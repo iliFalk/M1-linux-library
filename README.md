@@ -29,9 +29,16 @@ The pipeline writes exactly this layout:
 
 ## Configuration
 
-Every setting is an environment variable (or a key of the same name in lowercase in a
-`--config PATH` JSON object). `python -m music.cli --config ./config.json <command>` reads
-`{"music_root": "...", "music_state": "...", ...}` instead of the environment.
+Every setting is an environment variable, or a key of the same name in lowercase with the
+`MUSIC_` prefix dropped: `root`, `state`, `likes_export`, `resolver`, `resolver_args`,
+`ffmpeg`, `ffprobe`, `max_attempts`. `python -m music.cli --config ./config.json <command>`
+reads that JSON object instead of the environment, for example:
+
+```json
+{"root": "/home/me/Music", "state": "/home/me/.local/state/music", "likes_export": "/home/me/likes.json"}
+```
+
+Any key you leave out keeps its environment value or its default.
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
@@ -54,7 +61,6 @@ credentials into the container as `ND_USERNAME` / `ND_PASSWORD` and sets `ND_MUS
 
 ```
 python -m music.cli ingest          # read liked tracks into MUSIC_STATE/likes.json
-python -m music.cli resolve         # resolve the pending likes to local files
 python -m music.cli sync            # resolve, convert, tag, cover, index
 python -m music.cli sync --dry-run  # show what sync would do, write nothing
 python -m music.cli scan            # re-read MUSIC_ROOT into the sqlite index
@@ -70,14 +76,16 @@ added 2, missing 0, failed 0
 `report` prints one row per album:
 
 ```
-artist               album              tracks  seconds
-Artist Name          Album Name             10     2413
+artist       album       tracks  seconds
+Artist Name  Album Name      10   2413.0
+TOTAL                        10   2413.0
 ```
 
 A track that fails is retried on the next run and parked after `MUSIC_MAX_ATTEMPTS` (3) failed
-attempts. A parked track stays in `library.db` and in the summary's `failed` count; it no longer
-stops the run. `sync` exits non-zero only when the run itself broke — a missing or failed track
-is data, not an error exit.
+attempts. Parking happens once: the failing run counts the track in its `failed` total, and from
+then on later syncs skip the parked track, so it does not appear in a later run's `failed`
+count. It stays in `library.db` and is deliberately never retried again. `sync` exits non-zero
+only when the run itself broke — a missing or failed track is data, not an error exit.
 
 ## Resolver contract
 
