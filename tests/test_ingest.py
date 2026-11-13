@@ -31,7 +31,14 @@ class IngestTest(unittest.TestCase):
             "max_attempts": 3,
         }
 
+        self.export_only_bin = self.base / "no-spotify"
+        self.export_only_bin.mkdir()
+
     # -- helpers ---------------------------------------------------------
+    def export_path(self):
+        """PATH on which no `spotify` exists, so the export is the only source."""
+        return mock.patch.dict(os.environ, {"PATH": str(self.export_only_bin)})
+
     def export(self, payload) -> str:
         path = self.base / "export.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
@@ -82,36 +89,37 @@ class IngestTest(unittest.TestCase):
         )
         self.config["likes_export"] = export
 
-        collected = ingest.collect_likes(self.config)
-        self.assertEqual(collected["source"], "export")
-        self.assertEqual(len(collected["likes"]), 3)
-        first = collected["likes"][0]
-        self.assertEqual(
-            set(first), {"spotify_id", "artist", "title", "album", "added_at"}
-        )
-        self.assertEqual(first["artist"], "Nova, Guest")
-        self.assertEqual(first["title"], "Alpha")
-        self.assertEqual(first["album"], "First Light")
-        self.assertEqual(first["added_at"], "2024-01-02T03:04:05Z")
-        # added_at is never None, even when the row omits it
-        for track in collected["likes"]:
-            self.assertIsInstance(track["added_at"], str)
-            self.assertTrue(track["added_at"])
-            datetime.datetime.fromisoformat(track["added_at"])
+        with self.export_path():
+            collected = ingest.collect_likes(self.config)
+            self.assertEqual(collected["source"], "export")
+            self.assertEqual(len(collected["likes"]), 3)
+            first = collected["likes"][0]
+            self.assertEqual(
+                set(first), {"spotify_id", "artist", "title", "album", "added_at"}
+            )
+            self.assertEqual(first["artist"], "Nova, Guest")
+            self.assertEqual(first["title"], "Alpha")
+            self.assertEqual(first["album"], "First Light")
+            self.assertEqual(first["added_at"], "2024-01-02T03:04:05Z")
+            # added_at is never None, even when the row omits it
+            for track in collected["likes"]:
+                self.assertIsInstance(track["added_at"], str)
+                self.assertTrue(track["added_at"])
+                datetime.datetime.fromisoformat(track["added_at"])
 
-        self.assertEqual(ingest.merge_likes(self.config, collected["likes"]), 3)
-        path = ingest.likes_path(self.config)
-        self.assertEqual(path, self.state / "likes.json")
-        stored = json.loads(path.read_text(encoding="utf-8"))
-        self.assertIsInstance(stored, list)
-        self.assertEqual(len(stored), 3)
+            self.assertEqual(ingest.merge_likes(self.config, collected["likes"]), 3)
+            path = ingest.likes_path(self.config)
+            self.assertEqual(path, self.state / "likes.json")
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            self.assertIsInstance(stored, list)
+            self.assertEqual(len(stored), 3)
 
-        # second, identical run: nothing added, file keeps its length
-        again = ingest.collect_likes(self.config)
-        self.assertEqual(ingest.merge_likes(self.config, again["likes"]), 0)
-        stored_again = json.loads(path.read_text(encoding="utf-8"))
-        self.assertEqual(len(stored_again), len(stored))
-        self.assertEqual(stored_again, stored)
+            # second, identical run: nothing added, file keeps its length
+            again = ingest.collect_likes(self.config)
+            self.assertEqual(ingest.merge_likes(self.config, again["likes"]), 0)
+            stored_again = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(len(stored_again), len(stored))
+            self.assertEqual(stored_again, stored)
 
     def test_ingest_reports_counts_and_is_idempotent(self):
         self.config["likes_export"] = self.export(
@@ -131,10 +139,11 @@ class IngestTest(unittest.TestCase):
                 },
             ]
         )
-        first = ingest.ingest(self.config)
-        self.assertEqual(first, {"source": "export", "liked": 2, "added": 2, "total": 2})
-        second = ingest.ingest(self.config)
-        self.assertEqual(second, {"source": "export", "liked": 2, "added": 0, "total": 2})
+        with self.export_path():
+            first = ingest.ingest(self.config)
+            self.assertEqual(first, {"source": "export", "liked": 2, "added": 2, "total": 2})
+            second = ingest.ingest(self.config)
+            self.assertEqual(second, {"source": "export", "liked": 2, "added": 0, "total": 2})
 
     def test_merge_only_counts_new_entries(self):
         self.assertEqual(
