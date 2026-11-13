@@ -1,0 +1,20 @@
+# Navidrome only. The pipeline in music/ is the single writer of the library;
+# Navidrome gets that one directory read-only.
+services:
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: music-navidrome
+    restart: unless-stopped
+    ports:
+      - "${MUSIC_NAVIDROME_PORT:-4533}:4533"
+    environment:
+      ND_USERNAME: ${MUSIC_NAVIDROME_USER:-admin}
+      ND_PASSWORD: ${MUSIC_NAVIDROME_PASSWORD:-change-me}
+      ND_MUSICFOLDER: /music
+    volumes:
+      # Exactly one volume: the library root the pipeline writes.
+      - ${MUSIC_ROOT:-../Music}:/music:ro
+    # Optional: compose config validates on a fresh clone with no .env at all.
+    env_file:
+      - path: .env
+        required: false
