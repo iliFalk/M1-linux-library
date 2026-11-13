@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import sys
 import subprocess
 
 _DEFAULT_FFMPEG = "ffmpeg"
@@ -173,7 +174,10 @@ def place_track(config, track, src) -> pathlib.Path:
     target = target_path(config, track)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    write_cover(config, target.parent, src)
+    if write_cover(config, target.parent, src) is None:
+        # Silence here reads as "there was no art to want"; say it instead, once per placement.
+        print(f"note: no cover for {target.parent.name}/{target.stem}: the source carries no picture",
+              file=sys.stderr)
     convert_to_m4a(config, src, target)
 
     stem = target.stem

@@ -64,10 +64,15 @@ def _write_sine(path: pathlib.Path, seconds: float = _SINE_SECONDS) -> None:
 
 
 class FakeResolver:
-    """Offline resolver: generates a 2 s mono 16-bit WAV under ``<root>/.fakes``."""
+    """Offline resolver: generates a 2 s mono 16-bit WAV for tests and demos.
 
-    def __init__(self, root: str, fail_titles: tuple[str, ...] = ()):
+    The file lands in ``workdir`` — the state directory — and never inside the library root:
+    Navidrome scans that tree, and a stray ``.wav`` there becomes a phantom album.
+    """
+
+    def __init__(self, root: str, fail_titles: tuple[str, ...] = (), workdir: str | None = None):
         self.root = pathlib.Path(str(root))
+        self.workdir = pathlib.Path(str(workdir)) if workdir else self.root / ".fakes"
         self.fail_titles = tuple(fail_titles)
 
     def resolve(self, artist, title, album) -> ResolveResult:
@@ -78,7 +83,7 @@ class FakeResolver:
                 error=f"fake resolver: no match for {title!r} by {artist!r}",
                 source="fake",
             )
-        path = self.root / ".fakes" / (_slug(f"{artist}-{title}-{album}") + ".wav")
+        path = self.workdir / (_slug(f"{artist}-{title}-{album}") + ".wav")
         path.parent.mkdir(parents=True, exist_ok=True)
         _write_sine(path)
         return ResolveResult(ok=True, path=str(path), error=None, source="fake")
@@ -137,7 +142,8 @@ def make_resolver(config):
     """Build the resolver named by ``config["resolver"]``."""
     name = str((config or {}).get("resolver") or "yt-dlp")
     if name == "fake":
-        return FakeResolver(str((config or {}).get("root") or ""))
+        state = (config or {}).get("state") or (config or {}).get("state_dir") or ""
+        return FakeResolver(str((config or {}).get("root") or ""), workdir=str(state) or None)
     extra = (config or {}).get("resolver_args") or []
     return CommandResolver(name, extra)
 
