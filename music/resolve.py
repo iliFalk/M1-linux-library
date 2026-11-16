@@ -22,9 +22,11 @@ reported as the placed track.
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import tempfile
+from concurrent import futures
 from pathlib import Path
 
 from music import convert
@@ -51,6 +53,32 @@ FAKE_RESOLVER = "fake"
 
 #: Length of the tone the fake resolver writes, in seconds (AC40).
 FAKE_SECONDS = 4
+
+#: Environment variable that lowers the number of parallel resolver calls
+#: (AC42). The cap is fixed: at most :data:`DEFAULT_WORKERS` calls at once.
+CONCURRENCY_VAR = "MUSIC_CONCURRENCY"
+
+#: Resolver calls that run at once when the variable is unset, and the ceiling
+#: the variable cannot pass (AC42).
+DEFAULT_WORKERS = 3
+MAX_WORKERS = 3
+
+
+def workers(env: dict | None = None) -> int:
+    """How many resolver calls run at once: 1 to :data:`MAX_WORKERS` (AC42).
+
+    An unset, empty or unreadable value gives :data:`DEFAULT_WORKERS`. A value
+    above the ceiling is cut to it, a value below one is raised to one.
+    """
+    source = os.environ if env is None else env
+    raw = str(source.get(CONCURRENCY_VAR) or "").strip()
+    if not raw:
+        return DEFAULT_WORKERS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_WORKERS
+    return max(1, min(MAX_WORKERS, value))
 
 
 def _result(
@@ -309,15 +337,27 @@ def resolve_track(config: dict, track: dict) -> dict:
 def resolve_pending(config: dict, tracks: list[dict]) -> list[dict]:
     """Resolve every track; one failure never stops the rest (AC11).
 
-    Returns one ``TRACK_RESULT_KEYS`` dict per input track, in input order.
+    Up to :func:`workers` resolver calls run at once (AC42). Returns one
+    ``TRACK_RESULT_KEYS`` dict per input track, in input order, whatever order
+    the calls finish in.
     """
-    results: list[dict] = []
-    for track in tracks:
+
+    def one(track: dict) -> dict:
         try:
-            results.append(resolve_track(config, track))
+            return resolve_track(config, track)
         except Exception as exc:  # noqa: BLE001 - a bad track must not abort the run
-            results.append(_failed(track, f"{type(exc).__name__}: {exc}"))
-    return results
+            return _failed(track, f"{type(exc).__name__}: {exc}")
+
+    if len(tracks) < 2:
+        return [one(track) for track in tracks]
+    slots: list[dict | None] = [None] * len(tracks)
+    with futures.ThreadPoolExecutor(max_workers=workers()) as pool:
+        running = {
+            pool.submit(one, track): index for index, track in enumerate(tracks)
+        }
+        for done in futures.as_completed(running):
+            slots[running[done]] = done.result()
+    return [result for result in slots if result is not None]
 
 
 # --- the double ----------------------------------------------------------

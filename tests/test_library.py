@@ -315,6 +315,58 @@ class TestIngestCommand(LibraryTestCase):
         )
 
 
+# --- the status command ----------------------------------------------------
+
+
+class TestStatusCommand(LibraryTestCase):
+    def seed(self, statuses: list[tuple[str, str, str]]) -> None:
+        conn = store.open_index(self.config())
+        try:
+            for index, (spotify_id, status, error) in enumerate(statuses):
+                store.upsert_track(
+                    conn,
+                    self.like(spotify_id, "ArtistA", f"Track{index}", "AlbumX"),
+                )
+                conn.execute(
+                    "UPDATE tracks SET status = ?, attempts = ?, error = ? "
+                    "WHERE spotify_id = ?",
+                    (status, 1 if error else 0, error, spotify_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_ac43_status_counts_and_lists_the_faults(self):
+        self.seed(
+            [
+                ("sp1", contract.STATUS_OK, None),
+                ("sp2", contract.STATUS_OK, None),
+                ("sp3", contract.STATUS_FAILED, "resolver exited 1"),
+                ("sp4", contract.STATUS_PARKED, "no source"),
+            ]
+        )
+        code, out, _err = self.run_main(["status"])
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[0].split(), list(contract.STATUS_ROW_KEYS))
+        self.assertEqual(lines[1].split(), [contract.STATUS_PENDING, "0"])
+        self.assertEqual(lines[2].split(), [contract.STATUS_OK, "2"])
+        self.assertEqual(lines[3].split(), [contract.STATUS_FAILED, "1"])
+        self.assertEqual(lines[4].split(), [contract.STATUS_PARKED, "1"])
+        self.assertEqual(lines[5].split(), list(contract.FAULT_ROW_KEYS))
+        first = lines[6].split()
+        self.assertEqual(first[:5], ["ArtistA", "Track2", "AlbumX", "failed", "1"])
+        self.assertEqual(" ".join(first[5:]), "resolver exited 1")
+        second = lines[7].split()
+        self.assertEqual(second[:5], ["ArtistA", "Track3", "AlbumX", "parked", "1"])
+        self.assertEqual(" ".join(second[5:]), "no source")
+
+    def test_ac43_status_says_so_when_no_index_exists(self):
+        code, out, _err = self.run_main(["status"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "no index yet")
+
+
 # --- report ---------------------------------------------------------------
 
 

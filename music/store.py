@@ -242,6 +242,59 @@ def record_result(conn: sqlite3.Connection, result: dict) -> None:
 # --- reconciliation and report --------------------------------------------
 
 
+def _status_order() -> tuple[str, ...]:
+    """The statuses in the order the report prints them (AC43)."""
+    return (
+        contract.STATUS_PENDING,
+        contract.STATUS_OK,
+        contract.STATUS_FAILED,
+        contract.STATUS_PARKED,
+    )
+
+
+def status_rows(conn: sqlite3.Connection) -> list[dict]:
+    """One ``STATUS_ROW_KEYS`` dict per status, in contract order (AC43).
+
+    A status the index does not hold yet is reported with zero, so the shape of
+    the table does not change between runs.
+    """
+    counts = {
+        str(row[0]): int(row[1])
+        for row in conn.execute(
+            "SELECT status, COUNT(*) FROM tracks GROUP BY status"
+        )
+    }
+    order = _status_order()
+    rows = [{"status": name, "tracks": counts.get(name, 0)} for name in order]
+    rows.extend(
+        {"status": name, "tracks": counts[name]}
+        for name in sorted(set(counts) - set(order))
+    )
+    return rows
+
+
+def fault_rows(conn: sqlite3.Connection) -> list[dict]:
+    """One ``FAULT_ROW_KEYS`` dict per failed or parked track (AC43).
+
+    ``parked`` comes last: those tracks are never retried, the ``failed`` ones
+    are retried by the next run.
+    """
+    cursor = conn.execute(
+        f"SELECT {', '.join(contract.FAULT_ROW_KEYS)} FROM tracks "
+        "WHERE status IN (?, ?) "
+        "ORDER BY status, artist, album, title",
+        (contract.STATUS_FAILED, contract.STATUS_PARKED),
+    )
+    rows = []
+    for row in cursor:
+        entry = {key: row[key] for key in contract.FAULT_ROW_KEYS}
+        entry["attempts"] = int(entry["attempts"] or 0)
+        for key in ("artist", "title", "album", "error"):
+            entry[key] = "" if entry[key] is None else str(entry[key])
+        rows.append(entry)
+    return rows
+
+
 def path_is_placed(path: str | None) -> bool:
     """True when ``path`` is a regular file, judged without following a link.
 

@@ -185,3 +185,15 @@ tie-break when `added_at` and `title` are equal (assume source order), how
 without deleting rows (AC18), report row order (assume artist then album), and
 the exact `bin/music` arg-parsing messages. Docker/compose, README and
 `.env.example` (AC26–30) are outside this lane.
+
+## 8. Parallel resolve and the status table (AC42, AC43)
+
+`resolve_pending` keeps a thread pool of `workers()` threads: `MUSIC_CONCURRENCY` read at call time, cut to
+the `MAX_WORKERS` ceiling of three. Placement stays single-threaded by construction — `convert.reserve`
+claims each destination with `O_EXCL | O_NOFOLLOW`, so two threads cannot take the same name, and the index
+is written after the pool closes, one `record_result` per result, in the input order. The result list is
+filled by slot index, not by completion order, so AC11's ordering promise holds.
+
+`status_rows` counts per status and always returns the four contract statuses, zero included, so the table
+shape does not move between runs. `fault_rows` returns `failed` before `parked`: the first group is retried
+by the next sync, the second never is.

@@ -25,8 +25,8 @@ ENV_FILE = ROOT / ".env"
 # Every variable the compose file and the pipeline may read.
 COMPOSE_VARS = ("NAVIDROME_BIND_ADDRESS", "NAVIDROME_PORT", "NAVIDROME_ADMIN_PASSWORD")
 PIPELINE_VARS = tuple(contract.ENV_VARS.values())
-# The optional tool overrides (AC39).
-TOOL_VARS = ("MUSIC_FFMPEG", "MUSIC_FFPROBE")
+# The optional overrides (AC39, AC42).
+TOOL_VARS = ("MUSIC_FFMPEG", "MUSIC_FFPROBE", "MUSIC_CONCURRENCY")
 
 
 def _docs() -> str:

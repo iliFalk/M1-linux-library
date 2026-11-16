@@ -8,7 +8,7 @@ The README holds the start; this file holds the rest.
 `sync` runs three steps in order:
 
 1. `ingest` reads the liked tracks into `<MUSIC_STATE_DIR>/likes.json`, keyed on `spotify_id`, and keeps the order of the source. A flat list and the nested shape of a Spotify API dump are both accepted.
-2. `resolve` calls the resolver once per pending track, converts its output to AAC, tags the file, and places it at `<MUSIC_LIBRARY_ROOT>/<Artist>/<Album>/<NN - Title>.m4a`. One `cover.jpg` per album folder.
+2. `resolve` calls the resolver for each pending track, three calls at a time, converts the output to AAC, tags the file, and places it at `<MUSIC_LIBRARY_ROOT>/<Artist>/<Album>/<NN - Title>.m4a`. One `cover.jpg` per album folder. The result order follows the likes, whatever order the calls finish in.
 3. `scan` reconciles `<MUSIC_STATE_DIR>/library.db` with the folder.
 
 One row per track lives in the table `tracks` of `library.db`. The status moves `pending` → `ok` or `failed`. A `failed` track is retried on the next run; after three failures it becomes `parked` and is never resolved again. A row is never deleted, also not when its file disappears.
@@ -31,11 +31,14 @@ The pipeline reads the four `MUSIC_*` variables. The compose file reads the two 
 | `MUSIC_SPOTIFY_EXPORT` | `bin/music` | JSON export of liked tracks, used when no `spotify` executable is on `PATH`. A nested Spotify dump is normalised. |
 | `MUSIC_FFMPEG` | `bin/music` | The encoder to call, default `ffmpeg`. |
 | `MUSIC_FFPROBE` | `bin/music` | The prober to call, default `ffprobe`. |
+| `MUSIC_CONCURRENCY` | `bin/music` | Resolver calls that run at once: 1 to 3, default 3. A higher value is cut to 3. |
 | `NAVIDROME_BIND_ADDRESS` | compose | Host address the port is published on (default `127.0.0.1`, loopback only). Set `0.0.0.0` to publish on every interface. |
 | `NAVIDROME_PORT` | compose | Host port for the Navidrome web UI and Subsonic API (default `4533`). |
 | `NAVIDROME_ADMIN_PASSWORD` | compose | Initial password of the built-in `admin` user. Required — no default; compose fails while it is unset or empty. |
 
 `.env.example` lists the same variables with placeholder values and no real secret. `.env` is required and untracked. `docker compose` reads it from the repository root automatically.
+
+`status` prints one count row per status and then one row per `failed` or `parked` track with its attempt count and the resolver's reason. Those rows are the tracks `sync` will retry, or never retry once parked.
 
 `--config <path>` replaces the environment with a JSON object that carries the four keys `library_root`, `state_dir`, `resolver` and `spotify_export`. The file wins over the environment.
 

@@ -5,7 +5,7 @@ Nothing below the "Surface" block is negotiable; the surface is what makes a cri
 
 ## Surface fixed by this file
 
-CLI: `bin/music [--config <path>] <sync|scan|report|ingest> [--dry-run]`, executable, `python3` shebang.
+CLI: `bin/music [--config <path>] <sync|scan|report|status|ingest> [--dry-run]`, executable, `python3` shebang.
 `--dry-run` applies to `sync`, `scan` and `report`.
 Config file: JSON object with exactly the keys `library_root`, `state_dir`, `resolver`, `spotify_export`.
 `resolver` is a command string (shlex-split, may carry arguments). For one track it is called as
@@ -70,3 +70,8 @@ AC38 WHEN two different tracks sanitize to the same file name THE SYSTEM SHALL k
 AC39 WHEN `MUSIC_FFMPEG` or `MUSIC_FFPROBE` is set THE SYSTEM SHALL call that executable instead of the name on PATH.
 AC40 WHEN the resolver command is `fake` THE SYSTEM SHALL write a four-second tone in a private temp folder, take it as the resolver's file, and place the track through the normal conversion and guard. The temp file SHALL NOT be written under `library_root`.
 AC41 WHEN `music ingest` runs THE SYSTEM SHALL read the liked tracks into `likes.json`, resolve nothing, and print one line `total <N>, added <N>`.
+
+## Second development round (2026-11-16)
+
+AC42 WHEN `music sync` resolves tracks THE SYSTEM SHALL run at most three resolver calls at once, the number set by `MUSIC_CONCURRENCY` between one and three, and SHALL return one result per track in the order of the likes whatever order the calls finish in.
+AC43 WHEN `music status` runs THE SYSTEM SHALL print one row per status with its track count (pending, ok, failed, parked) and then one row per failed or parked track with artist, title, album, status, attempts and the resolver's reason. Without an index it SHALL print `no index yet`.

@@ -100,6 +100,44 @@ def _count_missing(conn, likes: list[dict]) -> int:
     return missing
 
 
+def _table(rows: list[tuple[str, ...]], widths: list[int] | None = None) -> list[str]:
+    """Render rows as aligned columns, the last one unpadded."""
+    if not rows:
+        return []
+    if widths is None:
+        widths = [max(len(row[index]) for row in rows) for index in range(len(rows[0]) - 1)]
+    lines = []
+    for row in rows:
+        cells = [cell.ljust(width) for cell, width in zip(row[:-1], widths)]
+        lines.append("  ".join(cells + [row[-1]]).rstrip())
+    return lines
+
+
+def status_lines(counts: list[dict], faults: list[dict]) -> list[str]:
+    """The count table, then one line per failed or parked track (AC43)."""
+    if not counts:
+        return ["no index yet"]
+    count_rows = [tuple(contract.STATUS_ROW_KEYS)] + [
+        (str(row["status"]), str(row["tracks"])) for row in counts
+    ]
+    lines = _table(count_rows)
+    if not faults:
+        return lines
+    fault_rows = [tuple(contract.FAULT_ROW_KEYS)] + [
+        (
+            _cell(row["artist"]),
+            _cell(row["title"]),
+            _cell(row["album"]),
+            _cell(row["status"]),
+            str(row["attempts"]),
+            _cell(row["error"]),
+        )
+        for row in faults
+    ]
+    lines.extend(_table(fault_rows))
+    return lines
+
+
 def sync(
     config: dict, dry_run: bool = False, steps: dict | None = None
 ) -> dict:

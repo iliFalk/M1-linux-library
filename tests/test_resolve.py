@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import struct
 import subprocess
@@ -760,6 +761,99 @@ class TestFakeResolverCommand(unittest.TestCase):
         self.assertEqual(placed.suffix, ".m4a")
         self.assertTrue(placed.is_relative_to(self.library_root))
         self.assertGreater(result["duration"] or 0, 0)
+
+
+class TestParallelResolve(unittest.TestCase):
+    """AC42: at most three resolver calls at once, results in input order."""
+
+    SLEEP = 0.3
+    COUNT = 6
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="parallel-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.library_root = self.tmp / "library"
+        self.state_dir = self.tmp / "state"
+        self.state_dir.mkdir()
+        self.bin_dir = self.tmp / "bin"
+        self.bin_dir.mkdir()
+        self.log = self.tmp / "calls.jsonl"
+        self.wav = self.tmp / "source.wav"
+        ResolveTestCase.make_wav(self, self.wav, seconds=1.0)
+        self.tracks = [
+            {
+                "spotify_id": f"sp-{index}",
+                "artist": "Aphex Twin",
+                "title": f"Track {index}",
+                "album": "Selected Ambient Works 85-92",
+                "added_at": f"2024-01-0{index + 1}T00:00:00Z",
+            }
+            for index in range(self.COUNT)
+        ]
+        (self.state_dir / "likes.json").write_text(
+            json.dumps(self.tracks), encoding="utf-8"
+        )
+        resolver = self.bin_dir / "resolver"
+        resolver.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys, time\n"
+            "start = time.time()\n"
+            f"time.sleep({self.SLEEP})\n"
+            f"with open({str(self.log)!r}, 'a', encoding='utf-8') as fh:\n"
+            "    fh.write(json.dumps({'start': start, 'end': time.time()}) + '\\n')\n"
+            f"print({str(self.wav)!r})\n",
+            encoding="utf-8",
+        )
+        resolver.chmod(0o755)
+        self.config = {
+            "library_root": str(self.library_root),
+            "state_dir": str(self.state_dir),
+            "resolver": str(resolver),
+            "spotify_export": str(self.tmp / "liked.json"),
+        }
+
+    def overlap(self) -> int:
+        calls = [
+            json.loads(line)
+            for line in self.log.read_text(encoding="utf-8").splitlines()
+        ]
+        return max(
+            sum(1 for call in calls if call["start"] <= other["start"] < call["end"])
+            for other in calls
+        )
+
+    def test_ac42_at_most_three_calls_run_at_once(self):
+        results = resolve_module.resolve_pending(self.config, self.tracks)
+        self.assertEqual(len(results), self.COUNT)
+        self.assertEqual(
+            [result["spotify_id"] for result in results],
+            [track["spotify_id"] for track in self.tracks],
+            "the results keep the input order",
+        )
+        self.assertTrue(all(result["ok"] for result in results))
+        peak = self.overlap()
+        self.assertLessEqual(peak, resolve_module.MAX_WORKERS)
+        self.assertGreater(peak, 1, "the calls really run in parallel")
+
+    def test_ac42_one_worker_runs_alone(self):
+        with mock.patch.dict(os.environ, {resolve_module.CONCURRENCY_VAR: "1"}):
+            resolve_module.resolve_pending(self.config, self.tracks[:2])
+        self.assertEqual(self.overlap(), 1)
+
+    def test_ac42_workers_reads_the_variable_and_caps_it(self):
+        self.assertEqual(resolve_module.workers({}), resolve_module.DEFAULT_WORKERS)
+        self.assertEqual(resolve_module.workers({resolve_module.CONCURRENCY_VAR: "1"}), 1)
+        self.assertEqual(resolve_module.workers({resolve_module.CONCURRENCY_VAR: "2"}), 2)
+        self.assertEqual(
+            resolve_module.workers({resolve_module.CONCURRENCY_VAR: "99"}),
+            resolve_module.MAX_WORKERS,
+            "the ceiling holds whatever the variable says",
+        )
+        self.assertEqual(resolve_module.workers({resolve_module.CONCURRENCY_VAR: "0"}), 1)
+        self.assertEqual(
+            resolve_module.workers({resolve_module.CONCURRENCY_VAR: "nonsense"}),
+            resolve_module.DEFAULT_WORKERS,
+        )
 
 
 if __name__ == "__main__":

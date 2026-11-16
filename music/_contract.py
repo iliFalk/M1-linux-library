@@ -24,11 +24,16 @@ __all__ = [
     "STATUS_FAILED",
     "STATUS_PARKED",
     "MAX_ATTEMPTS",
+    "CONCURRENCY_VAR",
+    "DEFAULT_WORKERS",
+    "MAX_WORKERS",
     "INGEST_RESULT_KEYS",
     "TRACK_RESULT_KEYS",
     "SCAN_RESULT_KEYS",
     "SYNC_SUMMARY_KEYS",
     "REPORT_ROW_KEYS",
+    "STATUS_ROW_KEYS",
+    "FAULT_ROW_KEYS",
     "load_config",
     "find_spotify_cli",
     "parse_spotify_cli",
@@ -50,6 +55,9 @@ __all__ = [
     "record_result",
     "scan",
     "report_rows",
+    "status_rows",
+    "fault_rows",
+    "workers",
     "sync",
     "main",
 ]
@@ -96,6 +104,14 @@ STATUS_PARKED = "parked"
 #: Attempts after which a failed track becomes parked (AC23).
 MAX_ATTEMPTS = 3
 
+#: The environment variable that limits parallel resolver calls (AC42).
+CONCURRENCY_VAR = "MUSIC_CONCURRENCY"
+
+#: Resolver calls that run at once when the variable is unset, and the cap the
+#: variable can never pass (AC42).
+DEFAULT_WORKERS = 3
+MAX_WORKERS = 3
+
 # --- result shapes --------------------------------------------------------
 
 #: Keys of the dict returned by ``ingest()``: total liked entries seen,
@@ -120,6 +136,12 @@ SYNC_SUMMARY_KEYS = ("added", "missing", "failed")
 
 #: Keys of one album row returned by ``report_rows()`` (AC16, AC17).
 REPORT_ROW_KEYS = ("artist", "album", "tracks", "seconds")
+
+#: Keys of one count row returned by ``status_rows()`` (AC43).
+STATUS_ROW_KEYS = ("status", "tracks")
+
+#: Keys of one row returned by ``fault_rows()`` (AC43).
+FAULT_ROW_KEYS = ("artist", "title", "album", "status", "attempts", "error")
 
 
 # --- config and Spotify ---------------------------------------------------
@@ -162,6 +184,10 @@ def resolve_track(config: dict, track: dict) -> dict:
 
 
 def resolve_pending(config: dict, tracks: list[dict]) -> list[dict]:
+    raise NotImplementedError
+
+
+def workers(env: dict | None = None) -> int:
     raise NotImplementedError
 
 
@@ -225,6 +251,14 @@ def scan(config: dict, conn: sqlite3.Connection) -> dict:
 
 
 def report_rows(conn: sqlite3.Connection) -> list[dict]:
+    raise NotImplementedError
+
+
+def status_rows(conn: sqlite3.Connection) -> list[dict]:
+    raise NotImplementedError
+
+
+def fault_rows(conn: sqlite3.Connection) -> list[dict]:
     raise NotImplementedError
 
 

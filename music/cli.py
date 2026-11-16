@@ -75,7 +75,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="print what a real run would do, writing neither the index nor the tree",
     )
     commands = parser.add_subparsers(
-        dest="command", metavar="{sync,scan,report,ingest}"
+        dest="command", metavar="{sync,scan,report,status,ingest}"
     )
     commands.required = True
     commands.add_parser(
@@ -86,6 +86,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     commands.add_parser(
         "report", parents=[common], help="print one row per album and the total"
+    )
+    commands.add_parser(
+        "status", parents=[common],
+        help="count the tracks per status and list what failed",
     )
     commands.add_parser(
         "ingest", help="read the liked tracks into the state directory"
@@ -106,6 +110,19 @@ def _run_scan(config: dict) -> int:
     finally:
         conn.close()
     print(f"indexed {result['indexed']}, missing {result['missing']}")
+    return 0
+
+
+def _run_status(config: dict) -> int:
+    conn = store.open_index_readonly(config)
+    try:
+        counts = store.status_rows(conn) if conn is not None else []
+        faults = store.fault_rows(conn) if conn is not None else []
+    finally:
+        if conn is not None:
+            conn.close()
+    for line in library.status_lines(counts, faults):
+        print(line)
     return 0
 
 
@@ -148,6 +165,8 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         return _run_scan(config)
     if args.command == "report":
         return _run_report(config)
+    if args.command == "status":
+        return _run_status(config)
     if args.command == "ingest":
         return _run_ingest(config)
     return 2
