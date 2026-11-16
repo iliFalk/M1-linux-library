@@ -89,6 +89,20 @@ Navidrome keeps users, play counts, played history and the playlists a client cr
 them. `docker compose down --volumes` deletes the volume and with it every user and playlist: the next start
 creates the admin user from `NAVIDROME_ADMIN_USER` and `NAVIDROME_ADMIN_PASSWORD` again.
 
+## Users
+
+The first run creates one admin user named `admin` with `NAVIDROME_ADMIN_PASSWORD`. `ND_DEVAUTOCREATEADMINUSERNAME`
+does nothing in 0.64.2 — the variable is read, the user is still `admin`. Make the account your own with the
+REST API, which needs the admin password once:
+
+1. Log in: `POST /auth/login` with `{"username": "admin", "password": "<NAVIDROME_ADMIN_PASSWORD>"}` returns a
+   `token`.
+2. Create the user: `POST /api/user` with `{"userName": "ilja", "name": "ilja", "email": "", "password": "<new>",
+   "isAdmin": true}` and the header `X-ND-AUTHORIZATION: Bearer <token>`.
+3. Delete the old one: `DELETE /api/user/<id>`; list the ids with `GET /api/user` and the same header.
+
+A recreated data volume brings `admin` back, so the recipe always has an entry point.
+
 ## Connect a client
 
 Server URL: `https://music.example.lan` — replace that host with the name your reverse proxy serves, and append `:NAVIDROME_PORT` only if you changed the port. Navidrome speaks plain HTTP inside the container and is published on `127.0.0.1` by default, so terminate TLS in front of it: point a reverse proxy (Caddy, nginx) on the Docker host at `127.0.0.1:<NAVIDROME_PORT>` and give it a certificate for your name. Clients then connect over HTTPS to the Subsonic API and log in with the `admin` account and `NAVIDROME_ADMIN_PASSWORD`.
