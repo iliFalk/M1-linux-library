@@ -83,6 +83,13 @@ The pipeline reads the four `MUSIC_*` variables. The compose file reads the two 
 
 The Navidrome image is pinned by digest (`deluan/navidrome:0.64.2@sha256:38dc2727…`), so a retagged upstream image cannot change what this checkout runs. `docker compose config` validates the compose file without pulling an image once `NAVIDROME_ADMIN_PASSWORD` is set; without it, compose exits non-zero and names the missing variable.
 
+## The player's database
+
+Navidrome keeps users, play counts, played history and the playlists a client creates in its own database at
+`/data`. The compose file puts that folder in the named volume `navidrome-data`, so a recreated container keeps
+them. `docker compose down --volumes` deletes the volume and with it every user and playlist: the next start
+creates the admin user from `NAVIDROME_ADMIN_USER` and `NAVIDROME_ADMIN_PASSWORD` again.
+
 ## Connect a client
 
 Server URL: `https://music.example.lan` — replace that host with the name your reverse proxy serves, and append `:NAVIDROME_PORT` only if you changed the port. Navidrome speaks plain HTTP inside the container and is published on `127.0.0.1` by default, so terminate TLS in front of it: point a reverse proxy (Caddy, nginx) on the Docker host at `127.0.0.1:<NAVIDROME_PORT>` and give it a certificate for your name. Clients then connect over HTTPS to the Subsonic API and log in with the `admin` account and `NAVIDROME_ADMIN_PASSWORD`.

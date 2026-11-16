@@ -19,3 +19,10 @@ services:
     volumes:
       # The pipeline's library_root (MUSIC_LIBRARY_ROOT), mounted at /music.
       - "${MUSIC_LIBRARY_ROOT:-./library}:/music:ro"
+      # Navidrome's own database: users, play counts, played history and the
+      # playlists a client creates. Without a named volume it lives in an
+      # anonymous one, and a recreated container loses it.
+      - "navidrome-data:/data"
+
+volumes:
+  navidrome-data:

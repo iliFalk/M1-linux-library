@@ -259,8 +259,12 @@ class ShellTestCase(unittest.TestCase):
         )
 
         volumes = service["volumes"]
-        self.assertEqual(len(volumes), 1, "exactly one volume: the library root")
-        volume = volumes[0]
+        self.assertEqual(len(volumes), 2, "the library root and Navidrome's data")
+        volume = next(item for item in volumes if item["target"] == "/music")
+        data = next(item for item in volumes if item["target"] == "/data")
+        self.assertEqual(data["type"], "volume", "the player's database needs a named volume")
+        self.assertEqual(data["source"], "navidrome-data")
+        self.assertFalse(data.get("read_only", False), "the player writes its database")
         self.assertEqual(volume["target"], "/music")
         self.assertEqual(volume["type"], "bind")
         self.assertEqual(Path(volume["source"]), (ROOT / "library").resolve())
