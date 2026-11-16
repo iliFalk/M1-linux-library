@@ -37,6 +37,21 @@ no traffic.
 Two limits are worth knowing. The search picks the first result, so a live or remix version can win over the
 album take. And the `year` tag comes from the like date, not from the recording.
 
+## Getting the likes from TuneMyMusic
+
+TuneMyMusic exports a whole Spotify library as one CSV: one row per track, with the Spotify id and the ISRC,
+and a `Type` column that says what the row belongs to — `Favorite` (a liked song), `Playlist` (one entry of
+one playlist), `Album` and `Artist` (the saved albums and artists).
+
+```sh
+bin/tmc-import "My Spotify Library.csv" --out ~/work/music-library
+```
+
+It writes `likes.json` and `playlists.json` in the shape `music sync` and `music playlists` read; a measured
+export of 7795 rows became 1235 likes and 56 playlists with 5940 entries, and the 26 albums and 125 artists
+were counted and dropped. The export carries no like date, so `added_at` follows the row order, one second per
+row: album track numbers stay what the file decided.
+
 ## Playlists
 
 `music playlists --from <file>` reads a Spotify playlist export and writes one `.m3u` per playlist into
