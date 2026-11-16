@@ -55,7 +55,6 @@ A failed track does not change the exit status. Run `python3 bin/music report` a
 | `MUSIC_PLAYLISTS_EXPORT` | the playlist export `music playlists` reads when `--from` is absent |
 | `NAVIDROME_BIND_ADDRESS` | the host address the player port is published on, default `127.0.0.1` |
 | `NAVIDROME_PORT` | the port of the player and its API, default `4533` |
-| `NAVIDROME_ADMIN_USER` | the name of the admin user Navidrome creates on its first run, default `admin` |
 | `NAVIDROME_ADMIN_PASSWORD` | the first password of the `admin` user; required, the player refuses to start without it |
 
 `.env` holds the real values and stays out of git. Every other value has a default.

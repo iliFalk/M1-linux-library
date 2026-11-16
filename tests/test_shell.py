@@ -23,12 +23,7 @@ DEVELOPMENT = ROOT / "docs" / "DEVELOPMENT.md"
 ENV_FILE = ROOT / ".env"
 
 # Every variable the compose file and the pipeline may read.
-COMPOSE_VARS = (
-    "NAVIDROME_BIND_ADDRESS",
-    "NAVIDROME_PORT",
-    "NAVIDROME_ADMIN_USER",
-    "NAVIDROME_ADMIN_PASSWORD",
-)
+COMPOSE_VARS = ("NAVIDROME_BIND_ADDRESS", "NAVIDROME_PORT", "NAVIDROME_ADMIN_PASSWORD")
 PIPELINE_VARS = tuple(contract.ENV_VARS.values())
 # The optional overrides (AC39, AC42).
 TOOL_VARS = (

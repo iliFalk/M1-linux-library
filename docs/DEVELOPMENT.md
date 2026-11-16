@@ -70,7 +70,6 @@ The pipeline reads the four `MUSIC_*` variables. The compose file reads the two 
 | `MUSIC_PLAYLISTS_EXPORT` | `bin/music` | The playlist export `music playlists` reads when `--from` is absent. |
 | `NAVIDROME_BIND_ADDRESS` | compose | Host address the port is published on (default `127.0.0.1`, loopback only). Set `0.0.0.0` to publish on every interface. |
 | `NAVIDROME_PORT` | compose | Host port for the Navidrome web UI and Subsonic API (default `4533`). |
-| `NAVIDROME_ADMIN_USER` | compose | Name of the admin user Navidrome creates on its first run (default `admin`). |
 | `NAVIDROME_ADMIN_PASSWORD` | compose | Initial password of the built-in `admin` user. Required — no default; compose fails while it is unset or empty. |
 
 `.env.example` lists the same variables with placeholder values and no real secret. `.env` is required and untracked. `docker compose` reads it from the repository root automatically.
@@ -79,7 +78,7 @@ The pipeline reads the four `MUSIC_*` variables. The compose file reads the two 
 
 `--config <path>` replaces the environment with a JSON object that carries the four keys `library_root`, `state_dir`, `resolver` and `spotify_export`. The file wins over the environment.
 
-`NAVIDROME_ADMIN_PASSWORD` has no default on purpose: while it is unset or empty, every `docker compose` command fails instead of starting Navidrome with a known password. Navidrome creates the admin user on its first run, named by `NAVIDROME_ADMIN_USER`; change the password in the UI afterwards. A name or password change later does not touch an existing user: recreate the container with an empty data directory for that.
+`NAVIDROME_ADMIN_PASSWORD` has no default on purpose: while it is unset or empty, every `docker compose` command fails instead of starting Navidrome with a known password. Navidrome creates the admin user on its first run; change the password in the UI afterwards.
 
 The Navidrome image is pinned by digest (`deluan/navidrome:0.64.2@sha256:38dc2727…`), so a retagged upstream image cannot change what this checkout runs. `docker compose config` validates the compose file without pulling an image once `NAVIDROME_ADMIN_PASSWORD` is set; without it, compose exits non-zero and names the missing variable.
 
