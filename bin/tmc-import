@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Convert a TuneMyMusic library export into the pipeline's input files.
+
+    bin/tmc-import "My Spotify Library.csv" [--out DIR]
+
+Writes ``likes.json`` (the liked songs) and ``playlists.json`` (one object per
+playlist) into ``DIR``, defaulting to the current directory. Then point
+``MUSIC_SPOTIFY_EXPORT`` and ``MUSIC_PLAYLISTS_EXPORT`` at them.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from music import tmc
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="tmc-import", description=__doc__.splitlines()[0])
+    parser.add_argument("export", metavar="CSV", help="the TuneMyMusic library export")
+    parser.add_argument(
+        "--out", metavar="DIR", default=".", help="where to write the two files (default: .)"
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        likes, playlists = tmc.convert(args.export)
+    except (OSError, ValueError) as exc:
+        print(f"tmc-import: {exc}", file=sys.stderr)
+        return 2
+
+    likes_path, playlists_path = tmc.write(args.out, likes, playlists)
+    print(f"{likes_path}: {len(likes)} likes")
+    print(f"{playlists_path}: {len(playlists)} playlists")
+    for playlist in playlists:
+        print(f"  {playlist['name']}: {len(playlist['tracks'])} tracks", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
