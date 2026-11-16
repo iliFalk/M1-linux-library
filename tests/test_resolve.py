@@ -234,7 +234,14 @@ class ResolveTestCase(unittest.TestCase):
         self.assertEqual(tags.get("title"), "Xtal")
         self.assertEqual(tags.get("album"), "Selected Ambient Works 85-92")
         self.assertEqual(tags.get("track"), "1")
-        self.assertEqual(tags.get("year"), "2019")
+        self.assertEqual(
+            tags.get("date") or tags.get("year"),
+            "2019",
+            "the year reaches the file under the key the muxer writes",
+        )
+        data = placed.read_bytes()
+        self.assertIn(b"ilst", data, "the tags sit in the iTunes atoms")
+        self.assertNotIn(b"mdta", data, "no mdta box: players read ilst only")
 
     def test_ac7_an_empty_tag_value_is_not_written(self):
         written = self.tmp / "tags" / "empty.m4a"
@@ -266,7 +273,11 @@ class ResolveTestCase(unittest.TestCase):
         self.assertEqual(tags.get("artist"), "Aphex Twin")
         self.assertNotIn("title", tags, "an empty value writes no tag at all")
         self.assertEqual(tags.get("track"), "1")
-        self.assertEqual(tags.get("year"), "2019")
+        self.assertEqual(
+            tags.get("date") or tags.get("year"),
+            "2019",
+            "the year reaches the file under the key the muxer writes",
+        )
 
     # --- AC8 -------------------------------------------------------------
 

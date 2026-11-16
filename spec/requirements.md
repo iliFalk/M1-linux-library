@@ -29,7 +29,7 @@ AC3  WHEN ingest runs THE SYSTEM SHALL write `<state_dir>/likes.json` as a JSON 
 AC4  WHEN ingest runs twice on the same source THE SYSTEM SHALL leave likes.json with the same entry count and no duplicate spotify_id.
 AC5  WHEN a track is resolved THE SYSTEM SHALL call the resolver command with artist, title and album as three positional arguments in that order.
 AC6  WHEN the resolver exits 0 THE SYSTEM SHALL take the produced file path from the first line of its standard output.
-AC7  WHEN a track is converted THE SYSTEM SHALL write an AAC-encoded .m4a file carrying the metadata tags artist, title, album, track and year.
+AC7  WHEN a track is converted THE SYSTEM SHALL write an AAC-encoded .m4a file carrying the metadata tags artist, title, album, track and year in the iTunes atoms (`ilst`), which a player reads; the `mdta` box is not used.
 AC8  WHEN a track is placed THE SYSTEM SHALL put it at `<library_root>/<Artist>/<Album>/<NN - Title>.m4a`, with NN the two-digit position of the track in its album, ordered by added_at and then by title.
 AC9  WHEN two tracks of one album are placed THE SYSTEM SHALL leave exactly one cover.jpg, a JPEG image, in that album folder.
 AC10 WHEN a track is converted THE SYSTEM SHALL record the duration that ffprobe reports for the written .m4a file.

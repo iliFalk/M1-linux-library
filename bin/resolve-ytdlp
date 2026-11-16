@@ -1,0 +1,80 @@
+#!/bin/sh
+# Resolver for the music pipeline: one track in, one audio file out.
+#
+# Contract (spec/requirements.md, AC5/AC6/AC11):
+#   resolve-ytdlp <artist> <title> <album>
+# Exit 0 and the produced file on line 1 of stdout is success. A non-zero exit
+# with a reason on stderr is failure, and the pipeline records it.
+#
+# The download is cached: the same artist and title is fetched once, and every
+# later call answers with the cached file. Set MUSIC_RESOLVER_CACHE to move the
+# cache, YTDLP to name another yt-dlp binary.
+set -eu
+
+if [ "$#" -lt 2 ]; then
+    echo "usage: $0 <artist> <title> [album]" >&2
+    exit 2
+fi
+
+artist=$1
+title=$2
+
+tool=${YTDLP:-}
+if [ -z "$tool" ]; then
+    tool=$(command -v yt-dlp || true)
+fi
+if [ -z "$tool" ] && [ -x "$HOME/.local/bin/yt-dlp" ]; then
+    tool=$HOME/.local/bin/yt-dlp
+fi
+if [ -z "$tool" ]; then
+    echo "resolve-ytdlp: yt-dlp not found; install it or set YTDLP" >&2
+    exit 3
+fi
+
+cache=${MUSIC_RESOLVER_CACHE:-$HOME/.cache/music-pipeline/resolver}
+mkdir -p "$cache"
+
+key=$(printf '%s - %s' "$artist" "$title" | tr -c 'A-Za-z0-9 .\n-' '_' | cut -c1-120)
+base="$cache/$key"
+
+# A cached download answers at once, whatever container it arrived in.
+for cached in "$base".*; do
+    case "$cached" in
+    *.jpg | *.jpeg | *.png | *.webp | *.part | *.json | *.ytdl) continue ;;
+    esac
+    if [ -f "$cached" ]; then
+        printf '%s\n' "$cached"
+        exit 0
+    fi
+done
+
+query="$artist - $title audio"
+set +e
+out=$(
+    "$tool" \
+        --no-playlist --no-progress --quiet --no-warnings \
+        --no-simulate --no-part \
+        --ignore-config \
+        -f "bestaudio/best" \
+        -x --audio-format best \
+        --write-thumbnail --convert-thumbnails jpg \
+        -o "$base.%(ext)s" \
+        --print after_move:filepath \
+        "ytsearch1:$query" 2>&1
+)
+status=$?
+set -e
+
+if [ "$status" -ne 0 ]; then
+    printf '%s\n' "$out" | tail -3 >&2
+    exit "$status"
+fi
+
+# --print may add lines; the produced file is the last path-shaped line.
+file=$(printf '%s\n' "$out" | awk 'NF && $0 ~ /\//' | tail -1)
+if [ -z "$file" ] || [ ! -f "$file" ]; then
+    echo "resolve-ytdlp: yt-dlp named no file for $artist - $title" >&2
+    printf '%s\n' "$out" | tail -3 >&2
+    exit 4
+fi
+printf '%s\n' "$file"

@@ -19,7 +19,7 @@ TOTAL                    2       8
 ## Install
 
 1. Download the repository as an archive and unpack it whole.
-2. Install the tools: `sudo apt install ffmpeg`, then a resolver, for example `pipx install yt-dlp`.
+2. Install the tools: `sudo apt install ffmpeg` and a resolver. `bin/resolve-ytdlp` needs `yt-dlp`; the stand-alone binary from its release page needs no Python.
 3. Copy `.env.example` to `.env` and fill in the four `MUSIC_*` values. The two paths are used as written, so give absolute paths or run every command from the unpacked folder.
 4. Run `python3 bin/music sync` from the unpacked folder. The first run downloads, converts and tags the tracks it can fetch.
 5. Set `NAVIDROME_ADMIN_PASSWORD` in `.env`, then run `docker compose up -d`. The player answers on `http://127.0.0.1:4533`.

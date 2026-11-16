@@ -43,6 +43,10 @@ def tool(name: str, variable: str) -> str:
 #: The AC7 tags, in the order ``write_tags`` writes them.
 TAG_KEYS = ("artist", "title", "album", "track", "year")
 
+#: ffmpeg's name for a tag, where the iTunes atom needs another key. The year
+#: lives in ``©day``, which the muxer writes for ``date`` only.
+FFMPEG_TAGS = {"year": "date"}
+
 #: Duration in seconds ffprobe reported for every file ``convert_to_m4a``
 #: wrote, keyed by resolved path (AC10).
 DURATIONS: dict[str, float] = {}
@@ -401,8 +405,9 @@ def write_tags(path: Path, tags: dict[str, str]) -> None:
     """Write ``tags`` (``TAG_KEYS``, AC7) into the ``.m4a`` at ``path``.
 
     The audio stream is copied, not re-encoded, and no other metadata is
-    carried over.  ``use_metadata_tags`` is what makes an explicit ``year``
-    survive into the mp4 ``mdta`` box; without it the muxer drops the key.
+    carried over.  The iTunes atoms are the target: a player such as Navidrome,
+    iTunes or an iPhone reads ``ilst`` and ignores the ``mdta`` box that
+    ``-movflags use_metadata_tags`` would write instead (AC7).
     """
     path = Path(path)
     tmp = _exclusive_temp(path, ".tags")
@@ -421,13 +426,13 @@ def write_tags(path: Path, tags: dict[str, str]) -> None:
         "-map_metadata",
         "-1",
         "-movflags",
-        "use_metadata_tags+faststart",
+        "+faststart",
     ]
     for key in TAG_KEYS:
         value = tags.get(key)
         if not value:
             continue
-        argv += ["-metadata", f"{key}={value}"]
+        argv += ["-metadata", f"{FFMPEG_TAGS.get(key, key)}={value}"]
     argv += ["-f", "ipod", str(tmp)]
     try:
         _run(argv)

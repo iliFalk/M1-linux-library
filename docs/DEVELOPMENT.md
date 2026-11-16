@@ -19,6 +19,24 @@ The resolver contract: the command gets three positional arguments, `<artist> <t
 
 The player is Navidrome. It mounts `MUSIC_LIBRARY_ROOT` read-only at `/music` and serves the folder over the Subsonic API. The player never writes the folder.
 
+## A ready resolver
+
+`bin/resolve-ytdlp` implements the resolver contract with yt-dlp, so the pipeline runs without a hand-written
+script:
+
+```sh
+MUSIC_RESOLVER="$PWD/bin/resolve-ytdlp" python3 bin/music sync
+```
+
+It calls `yt-dlp` from `PATH`, or `~/.local/bin/yt-dlp`, or the binary `YTDLP` names. The search is
+`ytsearch1:<artist> - <title> audio`, and the result is cached under `~/.cache/music-pipeline/resolver`
+(`MUSIC_RESOLVER_CACHE` moves it): the same artist and title downloads once, and the thumbnail lands next to
+the audio, which is where `ensure_cover` looks for it. A cached file answers at once, so a repeated sync costs
+no traffic.
+
+Two limits are worth knowing. The search picks the first result, so a live or remix version can win over the
+album take. And the `year` tag comes from the like date, not from the recording.
+
 ## Playlists
 
 `music playlists --from <file>` reads a Spotify playlist export and writes one `.m3u` per playlist into

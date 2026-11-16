@@ -208,3 +208,9 @@ or without a file is counted and dropped.
 The entry is written relative to `library_root` because that folder is mounted at `/music` inside the player.
 Navidrome resolves an `.m3u` entry against its music folder, so a host path would name nothing. The file
 lands in `Playlists/`, which `PlaylistsPath` (default: anywhere under the music folder) already covers.
+
+## 10. Tags reach a player (AC7)
+
+`write_tags` writes the iTunes atoms, not the `mdta` box: `-movflags use_metadata_tags` produced a file that
+ffprobe reads and taglib does not, so Navidrome indexed the whole library as `[Unknown Artist]`. The year goes
+through ffmpeg's `date` key, because the muxer only writes `©day` for that name.
