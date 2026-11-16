@@ -35,6 +35,7 @@ For updates, clone the repository instead: `git clone <url>`, then `git pull` fe
 | `python3 bin/music scan` | reconciles the index with the folder |
 | `python3 bin/music report` | prints one aligned row per album with its track count and seconds, then a `TOTAL` row |
 | `python3 bin/music status` | counts the tracks per status and lists every failed or parked track with its reason |
+| `python3 bin/music playlists --from <file>` | writes one `.m3u` per Spotify playlist into `<library_root>/Playlists`, only for tracks the library holds |
 | `python3 bin/music ingest` | reads the liked tracks into the state directory and prints `total N, added N` |
 | `python3 bin/music --config <path> sync` | reads the four keys from a JSON file instead of the environment |
 
@@ -51,6 +52,7 @@ A failed track does not change the exit status. Run `python3 bin/music report` a
 | `MUSIC_FFMPEG` | the encoder to call, default `ffmpeg` |
 | `MUSIC_FFPROBE` | the prober to call, default `ffprobe` |
 | `MUSIC_CONCURRENCY` | resolver calls that run at once, 1 to 3, default 3 |
+| `MUSIC_PLAYLISTS_EXPORT` | the playlist export `music playlists` reads when `--from` is absent |
 | `NAVIDROME_BIND_ADDRESS` | the host address the player port is published on, default `127.0.0.1` |
 | `NAVIDROME_PORT` | the port of the player and its API, default `4533` |
 | `NAVIDROME_ADMIN_PASSWORD` | the first password of the `admin` user; required, the player refuses to start without it |

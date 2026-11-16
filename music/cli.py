@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from music import _contract as contract
-from music import ingest, library, store
+from music import ingest, library, playlists, store
 
 
 class ConfigError(Exception):
@@ -75,7 +75,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="print what a real run would do, writing neither the index nor the tree",
     )
     commands = parser.add_subparsers(
-        dest="command", metavar="{sync,scan,report,status,ingest}"
+        dest="command",
+        metavar="{sync,scan,report,status,ingest,playlists}",
     )
     commands.required = True
     commands.add_parser(
@@ -94,6 +95,13 @@ def _build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "ingest", help="read the liked tracks into the state directory"
     )
+    playlist_command = commands.add_parser(
+        "playlists", help="write one .m3u per playlist of the export"
+    )
+    playlist_command.add_argument(
+        "--from", dest="playlists_from", metavar="PATH", default=None,
+        help="playlist export (default: MUSIC_PLAYLISTS_EXPORT)",
+    )
     return parser
 
 
@@ -110,6 +118,17 @@ def _run_scan(config: dict) -> int:
     finally:
         conn.close()
     print(f"indexed {result['indexed']}, missing {result['missing']}")
+    return 0
+
+
+def _run_playlists(config: dict, source: str | None) -> int:
+    try:
+        rows = playlists.build(config, source)
+    except ValueError as exc:
+        print(f"music: {exc}", file=sys.stderr)
+        return 2
+    for row in rows:
+        print(f"{row['name']}: {row['tracks']} tracks, {row['missing']} missing")
     return 0
 
 
@@ -167,6 +186,8 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         return _run_report(config)
     if args.command == "status":
         return _run_status(config)
+    if args.command == "playlists":
+        return _run_playlists(config, getattr(args, "playlists_from", None))
     if args.command == "ingest":
         return _run_ingest(config)
     return 2

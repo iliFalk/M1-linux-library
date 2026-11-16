@@ -19,6 +19,23 @@ The resolver contract: the command gets three positional arguments, `<artist> <t
 
 The player is Navidrome. It mounts `MUSIC_LIBRARY_ROOT` read-only at `/music` and serves the folder over the Subsonic API. The player never writes the folder.
 
+## Playlists
+
+`music playlists --from <file>` reads a Spotify playlist export and writes one `.m3u` per playlist into
+`<library_root>/Playlists`. A track reaches the file only when the index holds it with a placed file; the
+rest are counted as `missing` and stay out, so a playlist never names a file the library does not have.
+
+Two details decide whether Navidrome picks the files up:
+
+1. An entry in the file is a path **relative to the music folder** (`Artist/Album/01 - Title.m3u`), not a
+   host path: inside the player the library sits at `/music`. The command writes it that way.
+2. Navidrome imports `.m3u` files during its scan, and only once an admin user exists. `PlaylistsPath`
+   defaults to anywhere under the music folder, so the `Playlists` folder needs no configuration.
+
+The export may be a list of playlist objects, an object with a `playlists` list, or an object that maps a
+name to its tracks. A playlist is `{"name": …, "tracks": [<like entry>, …]}`; a nested Spotify row works
+as well.
+
 ## Configuration
 
 The pipeline reads the four `MUSIC_*` variables. The compose file reads the two `NAVIDROME_*` variables and `MUSIC_LIBRARY_ROOT`. A missing key is an error, not a default.
@@ -32,6 +49,7 @@ The pipeline reads the four `MUSIC_*` variables. The compose file reads the two 
 | `MUSIC_FFMPEG` | `bin/music` | The encoder to call, default `ffmpeg`. |
 | `MUSIC_FFPROBE` | `bin/music` | The prober to call, default `ffprobe`. |
 | `MUSIC_CONCURRENCY` | `bin/music` | Resolver calls that run at once: 1 to 3, default 3. A higher value is cut to 3. |
+| `MUSIC_PLAYLISTS_EXPORT` | `bin/music` | The playlist export `music playlists` reads when `--from` is absent. |
 | `NAVIDROME_BIND_ADDRESS` | compose | Host address the port is published on (default `127.0.0.1`, loopback only). Set `0.0.0.0` to publish on every interface. |
 | `NAVIDROME_PORT` | compose | Host port for the Navidrome web UI and Subsonic API (default `4533`). |
 | `NAVIDROME_ADMIN_PASSWORD` | compose | Initial password of the built-in `admin` user. Required — no default; compose fails while it is unset or empty. |

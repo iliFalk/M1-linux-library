@@ -34,6 +34,7 @@ __all__ = [
     "REPORT_ROW_KEYS",
     "STATUS_ROW_KEYS",
     "FAULT_ROW_KEYS",
+    "PLAYLIST_KEYS",
     "load_config",
     "find_spotify_cli",
     "parse_spotify_cli",
@@ -142,6 +143,9 @@ STATUS_ROW_KEYS = ("status", "tracks")
 
 #: Keys of one row returned by ``fault_rows()`` (AC43).
 FAULT_ROW_KEYS = ("artist", "title", "album", "status", "attempts", "error")
+
+#: Keys of one row returned by ``playlists.build()`` (AC44).
+PLAYLIST_KEYS = ("name", "tracks", "missing", "path")
 
 
 # --- config and Spotify ---------------------------------------------------

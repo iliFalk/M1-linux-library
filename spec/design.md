@@ -197,3 +197,14 @@ filled by slot index, not by completion order, so AC11's ordering promise holds.
 `status_rows` counts per status and always returns the four contract statuses, zero included, so the table
 shape does not move between runs. `fault_rows` returns `failed` before `parked`: the first group is retried
 by the next sync, the second never is.
+
+## 9. Playlists (AC44, AC45)
+
+`music playlists` is a separate command, not a sync step: a playlist is a view over the library, so it must
+not cost a resolver call. The export is read with the same row normaliser as the likes, so one reader serves
+both. `playlists.render` maps `spotify_id` to the placed path through the index; a track without an `ok` row
+or without a file is counted and dropped.
+
+The entry is written relative to `library_root` because that folder is mounted at `/music` inside the player.
+Navidrome resolves an `.m3u` entry against its music folder, so a host path would name nothing. The file
+lands in `Playlists/`, which `PlaylistsPath` (default: anywhere under the music folder) already covers.

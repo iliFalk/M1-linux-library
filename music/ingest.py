@@ -120,6 +120,11 @@ def _entry(raw: object) -> dict:
     return entry
 
 
+def normalise(raw: object) -> dict:
+    """Public name of :func:`_entry`: one liked or playlist row, five keys."""
+    return _entry(raw)
+
+
 def _entries(raw: object) -> list[dict]:
     if not isinstance(raw, list):
         raise ValueError(f"liked tracks are not a JSON list: {raw!r}")
