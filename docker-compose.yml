@@ -11,8 +11,10 @@ services:
     environment:
       ND_MUSICFOLDER: /music
       ND_PORT: "4533"
-      # No default on purpose: compose fails instead of starting Navidrome with
-      # a known admin password.
+      # The first run creates this admin user. The name is a setting, the
+      # password has no default on purpose: compose fails instead of starting
+      # Navidrome with a known admin password.
+      ND_DEVAUTOCREATEADMINUSERNAME: "${NAVIDROME_ADMIN_USER:-admin}"
       ND_DEVAUTOCREATEADMINPASSWORD: "${NAVIDROME_ADMIN_PASSWORD:?NAVIDROME_ADMIN_PASSWORD must be set, copy .env.example to .env and fill it in}"
     volumes:
       # The pipeline's library_root (MUSIC_LIBRARY_ROOT), mounted at /music.
