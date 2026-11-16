@@ -1,20 +1,19 @@
-# Navidrome only. The pipeline in music/ is the single writer of the library;
-# Navidrome gets that one directory read-only.
 services:
   navidrome:
-    image: deluan/navidrome:latest
-    container_name: music-navidrome
+    # Pinned by digest: deluan/navidrome 0.64.2, the upstream multi-arch index.
+    image: deluan/navidrome:0.64.2@sha256:38dc2727bfcfd5ede290f8ada114fc90368146f265ae4701ddddbcbe2a44ee52
+    container_name: navidrome
     restart: unless-stopped
     ports:
-      - "${MUSIC_NAVIDROME_PORT:-4533}:4533"
+      # Bound to loopback by default; set NAVIDROME_BIND_ADDRESS=0.0.0.0 to
+      # publish on every interface.
+      - "${NAVIDROME_BIND_ADDRESS:-127.0.0.1}:${NAVIDROME_PORT:-4533}:4533"
     environment:
-      ND_USERNAME: ${MUSIC_NAVIDROME_USER:-admin}
-      ND_PASSWORD: ${MUSIC_NAVIDROME_PASSWORD:-change-me}
       ND_MUSICFOLDER: /music
+      ND_PORT: "4533"
+      # No default on purpose: compose fails instead of starting Navidrome with
+      # a known admin password.
+      ND_DEVAUTOCREATEADMINPASSWORD: "${NAVIDROME_ADMIN_PASSWORD:?NAVIDROME_ADMIN_PASSWORD must be set, copy .env.example to .env and fill it in}"
     volumes:
-      # Exactly one volume: the library root the pipeline writes.
-      - ${MUSIC_ROOT:-../Music}:/music:ro
-    # Optional: compose config validates on a fresh clone with no .env at all.
-    env_file:
-      - path: .env
-        required: false
+      # The pipeline's library_root (MUSIC_LIBRARY_ROOT), mounted at /music.
+      - "${MUSIC_LIBRARY_ROOT:-./library}:/music:ro"

@@ -1,238 +1,210 @@
-"""Tests for the likes adapter and state/likes.json merging (offline)."""
+"""AC1-AC4: the Spotify adapter and the merge into ``<state_dir>/likes.json``."""
 
 from __future__ import annotations
 
-import datetime
 import json
 import os
-import pathlib
-import sys
+import shutil
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from music import ingest
+from music import ingest as ingest_module
+from music._contract import INGEST_RESULT_KEYS, LIKES_KEYS
+
+XTAL = {
+    "spotify_id": "sp-xtal",
+    "artist": "Aphex Twin",
+    "title": "Xtal",
+    "album": "Selected Ambient Works 85-92",
+    "added_at": "2019-05-01T10:00:00Z",
+}
+
+THA = {
+    "spotify_id": "sp-tha",
+    "artist": "Aphex Twin",
+    "title": "Tha",
+    "album": "Selected Ambient Works 85-92",
+    "added_at": "2019-06-02T10:00:00Z",
+}
+
+CLI_ONLY = {
+    "spotify_id": "sp-cli",
+    "artist": "Boards of Canada",
+    "title": "Roygbiv",
+    "album": "Music Has the Right to Children",
+    "added_at": "2020-01-01T00:00:00Z",
+}
+
+EXPORT_ONLY = {
+    "spotify_id": "sp-export",
+    "artist": "Autechre",
+    "title": "Amber",
+    "album": "Amber",
+    "added_at": "2021-01-01T00:00:00Z",
+}
 
 
-class IngestTest(unittest.TestCase):
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.base = pathlib.Path(self._tmp.name)
-        self.state = self.base / "state"
+class IngestTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="ingest-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.state_dir = self.tmp / "state"
+        self.state_dir.mkdir()
+        self.bin_dir = self.tmp / "bin"
+        self.bin_dir.mkdir()
+        self.export = self.tmp / "liked.json"
+        self.write_export([EXPORT_ONLY, XTAL, THA])
         self.config = {
-            "root": str(self.base / "Music"),
-            "state": str(self.state),
-            "likes_export": None,
-            "resolver": "fake",
-            "resolver_args": [],
-            "ffmpeg": "ffmpeg",
-            "ffprobe": "ffprobe",
-            "max_attempts": 3,
+            "library_root": str(self.tmp / "library"),
+            "state_dir": str(self.state_dir),
+            "resolver": "true",
+            "spotify_export": str(self.export),
         }
+        # A PATH that holds nothing but our own bin dir: no real spotify.
+        patcher = mock.patch.dict(
+            os.environ, {"PATH": str(self.bin_dir)}, clear=False
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-        self.export_only_bin = self.base / "no-spotify"
-        self.export_only_bin.mkdir()
+    # --- helpers ---------------------------------------------------------
 
-    # -- helpers ---------------------------------------------------------
-    def export_path(self):
-        """PATH on which no `spotify` exists, so the export is the only source."""
-        return mock.patch.dict(os.environ, {"PATH": str(self.export_only_bin)})
+    def write_export(self, entries: list[dict]) -> None:
+        self.export.write_text(json.dumps(entries), encoding="utf-8")
 
-    def export(self, payload) -> str:
-        path = self.base / "export.json"
-        path.write_text(json.dumps(payload), encoding="utf-8")
-        return str(path)
-
-    def spotify_cli(self, payload) -> pathlib.Path:
-        bindir = self.base / "bin"
-        bindir.mkdir()
-        script = bindir / "spotify"
+    def fake_spotify_cli(self, entries: list[dict]) -> Path:
+        script = self.bin_dir / "spotify"
+        payload = json.dumps(json.dumps(entries))
         script.write_text(
-            f"#!{sys.executable}\n"
-            "import json, sys\n"
-            "if sys.argv[1:] != ['liked', '--json']:\n"
-            "    sys.exit('unexpected args: ' + repr(sys.argv[1:]))\n"
-            f"print(json.dumps({payload!r}))\n",
+            "#!/bin/sh\n"
+            f"if [ \"$1\" = 'liked' ] && [ \"$2\" = '--json' ]; then\n"
+            f"  printf '%s\\n' {payload}\n"
+            "  exit 0\n"
+            "fi\n"
+            "echo 'usage: spotify liked --json' >&2\n"
+            "exit 2\n",
             encoding="utf-8",
         )
         script.chmod(0o755)
-        return bindir
+        return script
 
-    # -- tests -----------------------------------------------------------
-    def test_export_shape_is_normalised_and_merged_once(self):
-        export = self.export(
-            {
-                "tracks": [
-                    {
-                        "id": "t1",
-                        "artists": [{"name": "Nova"}, {"name": "Guest"}],
-                        "name": "Alpha",
-                        "album": {"name": "First Light"},
-                        "addedAt": "2024-01-02T03:04:05Z",
-                    },
-                    {
-                        "id": "t2",
-                        "artist": "Nova",
-                        "title": "Beta",
-                        "album": "First Light",
-                        "added": "2024-02-03T00:00:00Z",
-                    },
-                    {  # title but no id -> kept with a stable local id
-                        "artists": ["Nova"],
-                        "name": "No Id",
-                        "album": {"name": "First Light"},
-                    },
-                    {"album": {"name": "Nothing"}},  # neither id nor title -> ignored
-                ]
-            }
+    def likes_json(self) -> list[dict]:
+        return json.loads(
+            (self.state_dir / "likes.json").read_text(encoding="utf-8")
         )
-        self.config["likes_export"] = export
 
-        with self.export_path():
-            collected = ingest.collect_likes(self.config)
-            self.assertEqual(collected["source"], "export")
-            self.assertEqual(len(collected["likes"]), 3)
-            first = collected["likes"][0]
-            self.assertEqual(
-                set(first), {"spotify_id", "artist", "title", "album", "added_at"}
-            )
-            self.assertEqual(first["artist"], "Nova, Guest")
-            self.assertEqual(first["title"], "Alpha")
-            self.assertEqual(first["album"], "First Light")
-            self.assertEqual(first["added_at"], "2024-01-02T03:04:05Z")
-            # added_at is never None, even when the row omits it
-            for track in collected["likes"]:
-                self.assertIsInstance(track["added_at"], str)
-                self.assertTrue(track["added_at"])
-                datetime.datetime.fromisoformat(track["added_at"])
+    # --- AC1 -------------------------------------------------------------
 
-            self.assertEqual(ingest.merge_likes(self.config, collected["likes"]), 3)
-            path = ingest.likes_path(self.config)
-            self.assertEqual(path, self.state / "likes.json")
-            stored = json.loads(path.read_text(encoding="utf-8"))
-            self.assertIsInstance(stored, list)
-            self.assertEqual(len(stored), 3)
+    def test_ac1_without_a_spotify_cli_the_export_file_is_read(self):
+        self.assertIsNone(ingest_module.find_spotify_cli())
+        result = ingest_module.ingest(self.config)
+        self.assertEqual(tuple(result), INGEST_RESULT_KEYS)
+        self.assertEqual(
+            [entry["spotify_id"] for entry in result["likes"]],
+            ["sp-export", "sp-xtal", "sp-tha"],
+        )
+        self.assertEqual(
+            result["likes"][1],
+            {key: XTAL[key] for key in LIKES_KEYS},
+        )
+        # The export really is the source: point it elsewhere and see the change.
+        self.write_export([EXPORT_ONLY])
+        again = ingest_module.ingest(self.config)
+        self.assertEqual(
+            [entry["spotify_id"] for entry in again["likes"]],
+            ["sp-export", "sp-xtal", "sp-tha"],
+            "likes.json keeps what a previous run merged",
+        )
+        self.assertEqual(again["total"], 1)
+        self.assertEqual(again["added"], 0)
 
-            # second, identical run: nothing added, file keeps its length
-            again = ingest.collect_likes(self.config)
-            self.assertEqual(ingest.merge_likes(self.config, again["likes"]), 0)
-            stored_again = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(len(stored_again), len(stored))
-            self.assertEqual(stored_again, stored)
-
-    def test_ingest_reports_counts_and_is_idempotent(self):
-        self.config["likes_export"] = self.export(
+    def test_ac1_a_nested_spotify_dump_is_normalised(self):
+        self.write_export(
             [
                 {
-                    "id": "x1",
-                    "artists": ["Nova"],
-                    "name": "Alpha",
-                    "album": {"name": "First Light"},
-                },
-                {
-                    "id": "x2",
-                    "artist": "Nova",
-                    "title": "Beta",
-                    "album": "First Light",
-                    "added_at": "2024-05-06T07:08:09Z",
-                },
+                    "added_at": "2022-02-02T00:00:00Z",
+                    "track": {
+                        "id": "sp-nested",
+                        "name": "Teardrop",
+                        "artists": [{"name": "Massive Attack"}],
+                        "album": {"name": "Mezzanine"},
+                    },
+                }
             ]
         )
-        with self.export_path():
-            first = ingest.ingest(self.config)
-            self.assertEqual(first, {"source": "export", "liked": 2, "added": 2, "total": 2})
-            second = ingest.ingest(self.config)
-            self.assertEqual(second, {"source": "export", "liked": 2, "added": 0, "total": 2})
-
-    def test_merge_only_counts_new_entries(self):
+        result = ingest_module.ingest(self.config)
         self.assertEqual(
-            ingest.merge_likes(
-                self.config,
-                [
-                    {"spotify_id": "a", "artist": "Nova", "title": "Alpha",
-                     "album": "First", "added_at": "2024-01-01T00:00:00Z"},
-                    {"spotify_id": "b", "artist": "Nova", "title": "Beta",
-                     "album": "First", "added_at": "2024-01-01T00:00:00Z"},
-                    {"spotify_id": "b", "artist": "Nova", "title": "Beta",
-                     "album": "First", "added_at": "2024-01-01T00:00:00Z"},
-                ],
-            ),
-            2,
+            result["likes"],
+            [
+                {
+                    "spotify_id": "sp-nested",
+                    "artist": "Massive Attack",
+                    "title": "Teardrop",
+                    "album": "Mezzanine",
+                    "added_at": "2022-02-02T00:00:00Z",
+                }
+            ],
         )
+        self.assertEqual(tuple(self.likes_json()[0]), LIKES_KEYS)
+
+    def test_ac1_an_entry_with_neither_id_nor_title_is_refused(self):
+        self.write_export([{"track": {"album": {"name": "Nowhere"}}}])
+        with self.assertRaises(ValueError):
+            ingest_module.ingest(self.config)
+
+    # --- AC2 -------------------------------------------------------------
+
+    def test_ac2_with_a_spotify_cli_its_stdout_is_read(self):
+        self.fake_spotify_cli([CLI_ONLY])
+        self.assertIsNotNone(ingest_module.find_spotify_cli())
+        result = ingest_module.ingest(self.config)
+        self.assertEqual(tuple(result), INGEST_RESULT_KEYS)
         self.assertEqual(
-            ingest.merge_likes(
-                self.config,
-                [
-                    {"spotify_id": "b", "artist": "Nova", "title": "Beta",
-                     "album": "First", "added_at": "2024-01-01T00:00:00Z"},
-                    {"spotify_id": "c", "artist": "Nova", "title": "Gamma",
-                     "album": "Second", "added_at": "2024-01-01T00:00:00Z"},
-                ],
-            ),
-            1,
+            [entry["spotify_id"] for entry in result["likes"]],
+            ["sp-cli"],
+            "the CLI stdout wins over the export file",
         )
-        self.assertEqual(len(ingest.read_likes(self.config)), 3)
+        on_disk = self.likes_json()
+        self.assertEqual([entry["spotify_id"] for entry in on_disk], ["sp-cli"])
+        self.assertEqual(tuple(on_disk[0]), LIKES_KEYS)
 
-    def test_spotify_cli_adapter_is_used_when_on_path(self):
-        bindir = self.spotify_cli(
-            {
-                "items": [
-                    {
-                        "id": "cli-1",
-                        "artists": [{"name": "Nova"}],
-                        "name": "Alpha",
-                        "album": {"name": "First Light"},
-                        "added_at": "2024-03-04T05:06:07Z",
-                    }
-                ]
-            }
+    # --- AC3 -------------------------------------------------------------
+
+    def test_ac3_likes_json_holds_objects_with_exactly_the_five_keys(self):
+        ingest_module.ingest(self.config)
+        on_disk = self.likes_json()
+        self.assertEqual(len(on_disk), 3)
+        for entry in on_disk:
+            self.assertEqual(tuple(entry), LIKES_KEYS)
+            for key in LIKES_KEYS:
+                self.assertIsInstance(entry[key], str)
+        self.assertEqual(on_disk[1]["artist"], XTAL["artist"])
+        self.assertEqual(on_disk[1]["added_at"], XTAL["added_at"])
+
+    # --- AC4 -------------------------------------------------------------
+
+    def test_ac4_a_second_ingest_keeps_the_count_and_no_duplicate_id(self):
+        first = ingest_module.ingest(self.config)
+        self.assertEqual(tuple(first), INGEST_RESULT_KEYS)
+        self.assertEqual((first["total"], first["added"]), (3, 3))
+
+        second = ingest_module.ingest(self.config)
+        self.assertEqual(tuple(second), INGEST_RESULT_KEYS)
+        self.assertEqual(
+            (second["total"], second["added"]), (3, 0), "nothing new"
         )
-        with mock.patch.dict(os.environ, {"PATH": str(bindir)}):
-            collected = ingest.collect_likes(self.config)
-        self.assertEqual(collected["source"], "cli")
-        self.assertEqual(len(collected["likes"]), 1)
-        self.assertEqual(collected["likes"][0]["spotify_id"], "cli-1")
-        self.assertEqual(collected["likes"][0]["title"], "Alpha")
+        on_disk = self.likes_json()
+        self.assertEqual(len(on_disk), 3, "entry count unchanged")
+        ids = [entry["spotify_id"] for entry in on_disk]
+        self.assertEqual(len(ids), len(set(ids)), "no duplicate spotify_id")
 
-    def test_no_source_names_the_missing_input(self):
-        empty = self.base / "empty-bin"
-        empty.mkdir()
-        with mock.patch.dict(os.environ, {"PATH": str(empty)}):
-            with self.assertRaises(RuntimeError) as ctx:
-                ingest.collect_likes(self.config)
-        message = str(ctx.exception)
-        self.assertIn("spotify", message)
-        self.assertIn("MUSIC_LIKES_EXPORT", message)
-
-    def test_missing_export_file_raises(self):
-        self.config["likes_export"] = str(self.base / "nope.json")
-        with mock.patch.dict(os.environ, {"PATH": str(self.base / "empty-bin")}):
-            (self.base / "empty-bin").mkdir(exist_ok=True)
-            with self.assertRaises(RuntimeError) as ctx:
-                ingest.collect_likes(self.config)
-        self.assertIn("nope.json", str(ctx.exception))
-
-    def test_read_likes_missing_file_is_empty(self):
-        self.assertEqual(ingest.read_likes(self.config), [])
-        self.assertFalse(ingest.likes_path(self.config).exists())
-
-    def test_cli_failure_falls_back_to_export(self):
-        self.config["likes_export"] = self.export(
-            [{"id": "e1", "artists": ["Nova"], "name": "Alpha", "album": {"name": "A"}}]
-        )
-        bindir = self.base / "bad-bin"
-        bindir.mkdir()
-        script = bindir / "spotify"
-        script.write_text(
-            f"#!{sys.executable}\nimport sys\nsys.stderr.write('boom\\n')\nsys.exit(4)\n",
-            encoding="utf-8",
-        )
-        script.chmod(0o755)
-        with mock.patch.dict(os.environ, {"PATH": str(bindir)}):
-            collected = ingest.collect_likes(self.config)
-        self.assertEqual(collected["source"], "export")
-        self.assertEqual(collected["likes"][0]["spotify_id"], "e1")
+        # A new like appended on the third run counts as the only addition.
+        self.write_export([EXPORT_ONLY, XTAL, THA, CLI_ONLY])
+        third = ingest_module.ingest(self.config)
+        self.assertEqual((third["total"], third["added"]), (4, 1))
+        self.assertEqual(len(self.likes_json()), 4)
 
 
 if __name__ == "__main__":

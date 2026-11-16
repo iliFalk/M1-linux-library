@@ -1,142 +1,111 @@
-# M1-linux-library — development
+# Development — M1-linux-library
 
-How the pipeline works, what it reads and writes, and how to connect a player.
-The README carries the start; this file carries the detail.
+How the tool works, every variable, the client steps, tests, update and removal.
+The README holds the start; this file holds the rest.
 
-## The layout it writes
+## How it works
 
-```
-<MUSIC_ROOT>/<Artist>/<Album>/<NN - Title>.m4a
-<MUSIC_ROOT>/<Artist>/<Album>/cover.jpg
-```
+`sync` runs three steps in order:
 
-## Requirements
+1. `ingest` reads the liked tracks into `<MUSIC_STATE_DIR>/likes.json`, keyed on `spotify_id`, and keeps the order of the source. A flat list and the nested shape of a Spotify API dump are both accepted.
+2. `resolve` calls the resolver once per pending track, converts its output to AAC, tags the file, and places it at `<MUSIC_LIBRARY_ROOT>/<Artist>/<Album>/<NN - Title>.m4a`. One `cover.jpg` per album folder.
+3. `scan` reconciles `<MUSIC_STATE_DIR>/library.db` with the folder.
 
-- Python 3.14 — **standard library only**, no `pip install`.
-- `ffmpeg` and `ffprobe` on `PATH` (or pointed at with `MUSIC_FFMPEG` / `MUSIC_FFPROBE`).
-- `docker compose` for Navidrome.
-- A resolver of your choice, for example `yt-dlp` — none is bundled (see "Resolver contract").
+One row per track lives in the table `tracks` of `library.db`. The status moves `pending` → `ok` or `failed`. A `failed` track is retried on the next run; after three failures it becomes `parked` and is never resolved again. A row is never deleted, also not when its file disappears.
+
+The resolver contract: the command gets three positional arguments, `<artist> <title> <album>`, and runs without a shell. Exit 0 means line 1 of stdout names the produced audio file. A non-zero exit means stderr carries the reason, and the run continues with the next track.
+
+`MUSIC_RESOLVER=fake` answers from the pipeline itself: it writes a four-second tone into a temp folder and resolves it like any other source. Use it to prove the whole chain without a network, then set the real resolver.
+
+The player is Navidrome. It mounts `MUSIC_LIBRARY_ROOT` read-only at `/music` and serves the folder over the Subsonic API. The player never writes the folder.
 
 ## Configuration
 
-Every setting is an environment variable, or a key of the same name in lowercase with the
-`MUSIC_` prefix dropped: `root`, `state`, `likes_export`, `resolver`, `resolver_args`,
-`ffmpeg`, `ffprobe`, `max_attempts`. `python -m music.cli --config ./config.json <command>`
-reads that JSON object instead of the environment, for example:
+The pipeline reads the four `MUSIC_*` variables. The compose file reads the two `NAVIDROME_*` variables and `MUSIC_LIBRARY_ROOT`. A missing key is an error, not a default.
 
-```json
-{"root": "/home/me/Music", "state": "/home/me/.local/state/music", "likes_export": "/home/me/likes.json"}
-```
-
-Any key you leave out keeps its environment value or its default.
-
-| Variable | Meaning | Default |
+| Variable | Used by | Meaning |
 | --- | --- | --- |
-| `MUSIC_ROOT` | Library root, the tree the pipeline writes | `<home>/Music` |
-| `MUSIC_STATE` | State dir: `likes.json`, `library.db` | `<cwd>/state` |
-| `MUSIC_LIKES_EXPORT` | Path to the Spotify JSON export | unset |
-| `MUSIC_RESOLVER` | Resolver command; `"fake"` for the offline one | `yt-dlp` |
-| `MUSIC_RESOLVER_ARGS` | Extra arguments for the resolver, shell-split | unset |
-| `MUSIC_FFMPEG` | `ffmpeg` binary | `ffmpeg` |
-| `MUSIC_FFPROBE` | `ffprobe` binary | `ffprobe` |
-| `MUSIC_MAX_ATTEMPTS` | Failures before a track is parked | `3` |
-| `MUSIC_NAVIDROME_PORT` | Host port Navidrome is published on (compose only) | `4533` |
-| `MUSIC_NAVIDROME_USER` | Navidrome admin user (compose only) | `admin` |
-| `MUSIC_NAVIDROME_PASSWORD` | Navidrome admin password (compose only) | `change-me` |
+| `MUSIC_LIBRARY_ROOT` | `bin/music` | Library root the pipeline writes; mounted as the one Navidrome volume at `/music` (read-only). |
+| `MUSIC_STATE_DIR` | `bin/music` | State directory holding `library.db` and `likes.json`. |
+| `MUSIC_RESOLVER` | `bin/music` | Resolver command, shlex-split, called as `<resolver…> <artist> <title> <album>`. `fake` writes a four-second tone instead. |
+| `MUSIC_SPOTIFY_EXPORT` | `bin/music` | JSON export of liked tracks, used when no `spotify` executable is on `PATH`. A nested Spotify dump is normalised. |
+| `MUSIC_FFMPEG` | `bin/music` | The encoder to call, default `ffmpeg`. |
+| `MUSIC_FFPROBE` | `bin/music` | The prober to call, default `ffprobe`. |
+| `NAVIDROME_BIND_ADDRESS` | compose | Host address the port is published on (default `127.0.0.1`, loopback only). Set `0.0.0.0` to publish on every interface. |
+| `NAVIDROME_PORT` | compose | Host port for the Navidrome web UI and Subsonic API (default `4533`). |
+| `NAVIDROME_ADMIN_PASSWORD` | compose | Initial password of the built-in `admin` user. Required — no default; compose fails while it is unset or empty. |
 
-The three `MUSIC_NAVIDROME_*` variables are read by `docker-compose.yml`; compose passes the
-credentials into the container as `ND_USERNAME` / `ND_PASSWORD` and sets `ND_MUSICFOLDER=/music`.
+`.env.example` lists the same variables with placeholder values and no real secret. `.env` is required and untracked. `docker compose` reads it from the repository root automatically.
 
-## Commands in full
+`--config <path>` replaces the environment with a JSON object that carries the four keys `library_root`, `state_dir`, `resolver` and `spotify_export`. The file wins over the environment.
 
-```
-python -m music.cli ingest          # read liked tracks into MUSIC_STATE/likes.json
-python -m music.cli sync            # resolve, convert, tag, cover, index
-python -m music.cli sync --dry-run  # show what sync would do, write nothing
-python -m music.cli scan            # re-read MUSIC_ROOT into the sqlite index
-python -m music.cli report          # print the library summary
-```
+`NAVIDROME_ADMIN_PASSWORD` has no default on purpose: while it is unset or empty, every `docker compose` command fails instead of starting Navidrome with a known password. Navidrome creates the admin user on its first run; change the password in the UI afterwards.
 
-`sync` ends with a summary line:
-
-```
-added 2, missing 0, failed 0
-```
-
-`report` prints one row per album:
-
-```
-artist       album       tracks  seconds
-Artist Name  Album Name      10   2413.0
-TOTAL                        10   2413.0
-```
-
-A track that fails is retried on the next run and parked after `MUSIC_MAX_ATTEMPTS` (3) failed
-attempts. Parking happens once: the failing run counts the track in its `failed` total, and from
-then on later syncs skip the parked track, so it does not appear in a later run's `failed`
-count. It stays in `library.db` and is deliberately never retried again. `sync` exits non-zero
-only when the run itself broke — a missing or failed track is data, not an error exit.
-
-## Resolver contract
-
-Resolving is a seam, not a downloader. The command named in `MUSIC_RESOLVER` (default `yt-dlp`)
-is called with the track's **artist**, **title** and **album**, and must either
-
-- print the path of the resolved audio file on stdout and exit `0`, or
-- exit non-zero with a message on stderr — a clean failure.
-
-A clean failure is recorded in `library.db` and retried on the next run. `MUSIC_RESOLVER="fake"`
-selects the in-repo `FakeResolver` used by the test suite, so everything runs offline. This
-repository ships the seam and the fake only; bring your own resolver for real downloads.
-
-## Navidrome
-
-`docker-compose.yml` runs one service, `deluan/navidrome:latest`, with one volume,
-`${MUSIC_ROOT:-../Music}:/music:ro`. The library is mounted read-only on purpose: the pipeline is
-the only writer. Compose reads the optional `.env` (`env_file: [{path: .env, required: false}]`),
-so `docker compose config` validates on a fresh clone that has no `.env`.
-
-The run never starts the container. Start it yourself:
-
-```
-docker compose up -d
-```
-
-Navidrome keeps its own database (users, play counts, playlists, scans) inside the container
-layer, not in the mounted volume — that is the price of the single-volume requirement. When the
-container is recreated, that state is lost and Navidrome rescans `/music` from scratch: the files
-and their tags survive, the listening history and any change made in the web UI do not. Do not
-`docker compose down -v` expecting it to come back.
+The Navidrome image is pinned by digest (`deluan/navidrome:0.64.2@sha256:38dc2727…`), so a retagged upstream image cannot change what this checkout runs. `docker compose config` validates the compose file without pulling an image once `NAVIDROME_ADMIN_PASSWORD` is set; without it, compose exits non-zero and names the missing variable.
 
 ## Connect a client
 
-Server URL: `http://<your-server-ip>:<MUSIC_NAVIDROME_PORT>` (default port `4533`).
-Username and password: `MUSIC_NAVIDROME_USER` and `MUSIC_NAVIDROME_PASSWORD` from `.env`.
+Server URL: `https://music.example.lan` — replace that host with the name your reverse proxy serves, and append `:NAVIDROME_PORT` only if you changed the port. Navidrome speaks plain HTTP inside the container and is published on `127.0.0.1` by default, so terminate TLS in front of it: point a reverse proxy (Caddy, nginx) on the Docker host at `127.0.0.1:<NAVIDROME_PORT>` and give it a certificate for your name. Clients then connect over HTTPS to the Subsonic API and log in with the `admin` account and `NAVIDROME_ADMIN_PASSWORD`.
 
-### Amperfy (iOS)
+Reaching Navidrome directly requires `NAVIDROME_BIND_ADDRESS=0.0.0.0`, which publishes it on every interface as plain HTTP with the admin password in clear text — use it only on a trusted network.
 
-1. Open the App Store.
-2. Search for `Amperfy`.
-3. Install Amperfy.
-4. Open Amperfy.
-5. Choose "Add server".
-6. Enter the server URL.
-7. Enter the username from `.env`.
-8. Enter the password from `.env`.
-9. Connect.
-10. Browse by artist or album.
+### Amperfy on iOS
 
-### SonicLair (Android TV)
+1. Install **Amperfy** from the App Store.
+2. Open Amperfy and choose **Add Server** (or the plus button on the server list).
+3. Enter the server URL, e.g. `https://music.example.lan`.
+4. Enter username `admin` and the password from `NAVIDROME_ADMIN_PASSWORD`.
+5. Save; Amperfy syncs the library from Navidrome and starts playback.
 
-1. Install SonicLair from the Play Store, or sideload its APK.
-2. Open SonicLair.
-3. Go to Settings.
-4. Choose "Server".
-5. Choose "Add server".
-6. Enter the same server URL.
-7. Enter the same username and password.
-8. Connect.
-9. Browse the library with the remote's direction keys.
+### SonicLair on Android TV
 
-Screen and menu names differ between client versions; the steps above name the visible screens
-("Settings", "Server", "Add server") and the action on each, so read the wording on your version.
+1. Install **SonicLair** from the Play Store on the Android TV device.
+2. Open SonicLair and select **Add server**.
+3. Enter the server URL, e.g. `https://music.example.lan`.
+4. Enter username `admin` and the password from `NAVIDROME_ADMIN_PASSWORD`.
+5. Confirm, then pick the Navidrome library and browse or search for music.
+
+## Troubleshooting
+
+- `docker compose` fails with `NAVIDROME_ADMIN_PASSWORD must be set`: copy `.env.example` to `.env` and fill in `NAVIDROME_ADMIN_PASSWORD`. Every other compose variable has a default; this one deliberately does not.
+- A client cannot reach Navidrome: the port is published on `127.0.0.1` only. Reach it through the TLS reverse proxy, or set `NAVIDROME_BIND_ADDRESS`.
+- Navidrome shows an empty library: confirm `MUSIC_LIBRARY_ROOT` is the same path the pipeline wrote to and that the files sit under `<Artist>/<Album>/*.m4a`.
+- The library is mounted read-only on purpose: the pipeline writes it, Navidrome only reads it.
+- A track stays `failed`: the resolver wrote its reason into the `error` column of `library.db`. After three failures the track is `parked`.
+
+## Tests
+
+The suite needs no network. It encodes real files, so `ffmpeg` and `ffprobe` must be installed. It runs 93 tests and takes about six seconds:
+
+```sh
+python3 -m unittest discover -s tests
+```
+
+## Update
+
+```sh
+git -C <clone> pull
+```
+
+The state directory and the library stay as they are. A resumed run resolves only the tracks that are still pending.
+
+## Removal
+
+```sh
+docker compose down
+```
+
+Then delete the checkout, the state directory and the library folder. Nothing outside those three paths is written.
+
+## Layout
+
+| Path | Holds |
+|---|---|
+| `bin/music` | the launcher; all parsing lives in `music/cli.py` |
+| `music/ingest.py` | the Spotify adapter and the merge into `likes.json` |
+| `music/resolve.py` | the resolver call, conversion, tagging, placement |
+| `music/store.py` | `library.db`: the `tracks` table, `scan` and the report rows |
+| `music/library.py` | `sync` orchestration, the summary line, the report table |
+| `music/_contract.py` | the shared names; every body raises `NotImplementedError` |
+| `spec/` | requirements, design, the lane split |
+| `tests/` | the offline suite |

@@ -1,296 +1,765 @@
-"""Tests for resolving, converting, tagging and placing tracks (offline, real ffmpeg)."""
+"""AC5-AC11: the resolver call, conversion, placement and the failure path.
+
+Audio fixtures are WAV files generated with ``wave``; the resolver is a small
+stand-in script in a temporary ``bin`` dir, so every test runs offline.
+"""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
-import pathlib
+import shutil
 import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 import wave
+from pathlib import Path
+from unittest import mock
 
-from music import convert, ingest, resolve
-from music.resolve import ResolveResult
+from music import _contract as contract
+from music import convert
+from music import resolve as resolve_module
+from music import store
+from music._contract import LIKES_KEYS, TRACK_RESULT_KEYS
 
-FFMPEG = "ffmpeg"
-FFPROBE = "ffprobe"
+XTAL = {
+    "spotify_id": "sp-xtal",
+    "artist": "Aphex Twin",
+    "title": "Xtal",
+    "album": "Selected Ambient Works 85-92",
+    "added_at": "2019-05-01T10:00:00Z",
+}
 
-TRACKS = [
-    {
-        "spotify_id": "t-alpha",
-        "artist": "Nova",
-        "title": "Alpha",
-        "album": "First Light",
-        "added_at": "2024-01-02T03:04:05Z",
-    },
-    {
-        "spotify_id": "t-beta",
-        "artist": "Nova",
-        "title": "Beta",
-        "album": "First Light",
-        "added_at": "2024-01-03T00:00:00Z",
-    },
-    {
-        "spotify_id": "t-gamma",
-        "artist": "Nova",
-        "title": "Gamma",
-        "album": "Second Sky",
-        "added_at": "2024-02-04T00:00:00Z",
-    },
-]
+ZEBRA = {
+    "spotify_id": "sp-zebra",
+    "artist": "Aphex Twin",
+    "title": "Zebra",
+    "album": "Two Tracks",
+    "added_at": "2024-01-01T00:00:00Z",
+}
 
+APPLE = {
+    "spotify_id": "sp-apple",
+    "artist": "Aphex Twin",
+    "title": "Apple",
+    "album": "Two Tracks",
+    "added_at": "2024-02-01T00:00:00Z",
+}
 
-class StaticResolver:
-    """Resolver stub that reports a fixed local file; no network, no download."""
+GOOD = {
+    "spotify_id": "sp-good",
+    "artist": "Boards of Canada",
+    "title": "Roygbiv",
+    "album": "Music Has the Right to Children",
+    "added_at": "2020-01-01T00:00:00Z",
+}
 
-    def __init__(self, path):
-        self.path = str(path)
-
-    def resolve(self, artist, title, album):
-        return ResolveResult(ok=True, path=self.path, error=None, source="static")
-
-
-def write_wav(path: pathlib.Path, freq: float, seconds: float = 2.0) -> pathlib.Path:
-    rate = 44100
-    samples = bytearray()
-    for index in range(int(rate * seconds)):
-        value = int(6000 * math.sin(2.0 * math.pi * freq * index / rate))
-        samples += struct.pack("<h", value)
-    with wave.open(str(path), "wb") as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(rate)
-        handle.writeframes(bytes(samples))
-    return path
+BAD = {
+    "spotify_id": "sp-bad",
+    "artist": "Boards of Canada",
+    "title": "Bad",
+    "album": "Music Has the Right to Children",
+    "added_at": "2020-02-01T00:00:00Z",
+}
 
 
-def ffprobe_json(path) -> dict:
-    result = subprocess.run(
-        [FFPROBE, "-v", "error", "-print_format", "json",
-         "-show_format", "-show_streams", str(path)],
+def probe_tags(path: Path) -> dict:
+    """The format tags ffprobe reads out of ``path``."""
+    done = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format_tags",
+            "-of",
+            "json",
+            str(path),
+        ],
+        check=True,
         capture_output=True,
         text=True,
     )
-    if result.returncode != 0:
-        raise AssertionError(f"ffprobe failed on {path}: {result.stderr}")
-    return json.loads(result.stdout)
+    return json.loads(done.stdout)["format"].get("tags", {})
 
 
-class ResolveTest(unittest.TestCase):
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.base = pathlib.Path(self._tmp.name)
-        self.root = self.base / "Music"
-        self.state = self.base / "state"
+class ResolveTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="resolve-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.state_dir = self.tmp / "state"
+        self.state_dir.mkdir()
+        self.library_root = self.tmp / "library"
+        self.media = self.tmp / "media"
+        self.media.mkdir()
+        self.bin_dir = self.tmp / "bin"
+        self.bin_dir.mkdir()
+        self.log = self.tmp / "argv.log"
+        self.wav = self.make_wav(self.media / "source.wav", seconds=1.0)
+        self.set_likes([XTAL])
+        self.resolver = self.fake_resolver(
+            {XTAL["title"]: (0, str(self.wav), "")}
+        )
         self.config = {
-            "root": str(self.root),
-            "state": str(self.state),
-            "likes_export": None,
-            "resolver": "fake",
-            "resolver_args": [],
-            "ffmpeg": FFMPEG,
-            "ffprobe": FFPROBE,
-            "max_attempts": 3,
+            "library_root": str(self.library_root),
+            "state_dir": str(self.state_dir),
+            "resolver": f"{sys.executable} {self.resolver}",
+            "spotify_export": str(self.tmp / "liked.json"),
         }
-        # Two 2-second WAV fixtures generated here, no fixture files on disk.
-        self.wav_a = write_wav(self.base / "tone-a.wav", 440.0)
-        self.wav_b = write_wav(self.base / "tone-b.wav", 660.0)
-        ingest.merge_likes(self.config, TRACKS)
-        self.track_a, self.track_b, self.track_c = TRACKS
 
-    # -- helpers ---------------------------------------------------------
-    def target(self, track) -> pathlib.Path:
-        return resolve.target_path(self.config, track)
+    # --- fixtures --------------------------------------------------------
 
-    def source_with_art(self) -> pathlib.Path:
-        """A real m4a with an attached picture, built with the real ffmpeg."""
-        out = self.base / "with-art.m4a"
-        result = subprocess.run(
+    def make_wav(self, path: Path, seconds: float) -> Path:
+        rate = 8000
+        frames = b"".join(
+            struct.pack("<h", int(3000 * math.sin(2 * math.pi * 440 * i / rate)))
+            for i in range(int(rate * seconds))
+        )
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(rate)
+            handle.writeframes(frames)
+        return path
+
+    def fake_resolver(self, plan: dict[str, tuple[int, str, str]]) -> Path:
+        """A resolver script: per-title exit code, stdout and stderr.
+
+        ``plan`` maps a title to ``(exit code, stdout, stderr)``; the key
+        ``"*"`` is the fallback.
+        """
+        plan = {
+            "*": (2, "", "no plan for this track\n"),
+            **plan,
+        }
+        script = self.bin_dir / "resolver"
+        script.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "argv = sys.argv[1:]\n"
+            f"with open({str(self.log)!r}, 'a', encoding='utf-8') as fh:\n"
+            "    fh.write(json.dumps(argv) + '\\n')\n"
+            f"plan = json.loads({json.dumps(plan)!r})\n"
+            "code, out, err = plan.get(argv[1], plan['*'])\n"
+            "if err:\n"
+            "    sys.stderr.write(err)\n"
+            "if out:\n"
+            "    sys.stdout.write(out + '\\n')\n"
+            "raise SystemExit(code)\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return script
+
+    def set_likes(self, entries: list[dict]) -> None:
+        (self.state_dir / "likes.json").write_text(
+            json.dumps([{key: entry[key] for key in LIKES_KEYS} for entry in entries]),
+            encoding="utf-8",
+        )
+
+    def recorded_argv(self) -> list[list[str]]:
+        if not self.log.is_file():
+            return []
+        return [
+            json.loads(line)
+            for line in self.log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    # --- AC5 -------------------------------------------------------------
+
+    def test_ac5_the_resolver_is_called_with_artist_title_album_positionally(self):
+        result = resolve_module.resolve_track(self.config, XTAL)
+        self.assertEqual(tuple(result), TRACK_RESULT_KEYS)
+        calls = self.recorded_argv()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            calls[0], ["Aphex Twin", "Xtal", "Selected Ambient Works 85-92"]
+        )
+        self.assertEqual(
+            resolve_module.resolver_argv(self.config),
+            [sys.executable, str(self.resolver)],
+            "the base argv is the shlex-split resolver string",
+        )
+
+    # --- AC6 -------------------------------------------------------------
+
+    def test_ac6_an_exit_zero_puts_the_first_stdout_line_to_work(self):
+        self.fake_resolver(
+            {XTAL["title"]: (0, f"{self.wav}\nthis second line is ignored", "")}
+        )
+        result = resolve_module.resolve_track(self.config, XTAL)
+        self.assertEqual(tuple(result), TRACK_RESULT_KEYS)
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["source"], str(self.wav))
+        placed = Path(result["path"])
+        self.assertTrue(placed.is_file())
+        self.assertEqual(placed.name, "01 - Xtal.m4a")
+        self.assertEqual(
+            placed, self.library_root / "Aphex Twin" / "Selected Ambient Works 85-92" / placed.name
+        )
+
+    # --- AC7 -------------------------------------------------------------
+
+    def test_ac7_the_m4a_carries_the_five_tags(self):
+        result = resolve_module.resolve_track(self.config, XTAL)
+        self.assertEqual(tuple(result), TRACK_RESULT_KEYS)
+        placed = Path(result["path"])
+        self.assertEqual(placed.suffix, ".m4a")
+        codec = subprocess.run(
             [
-                FFMPEG, "-y", "-v", "error",
-                "-i", str(self.wav_a),
-                "-f", "lavfi", "-i", "color=c=navy:s=64x64:d=2",
-                "-map", "0:a:0", "-map", "1:v:0",
-                "-c:a", "aac", "-c:v", "mjpeg",
-                "-disposition:v", "attached_pic", "-shortest",
-                str(out),
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(placed),
             ],
+            check=True,
             capture_output=True,
             text=True,
+        ).stdout.strip()
+        self.assertEqual(codec, "aac")
+
+        tags = probe_tags(placed)
+        self.assertEqual(tags.get("artist"), "Aphex Twin")
+        self.assertEqual(tags.get("title"), "Xtal")
+        self.assertEqual(tags.get("album"), "Selected Ambient Works 85-92")
+        self.assertEqual(tags.get("track"), "1")
+        self.assertEqual(tags.get("year"), "2019")
+
+    def test_ac7_an_empty_tag_value_is_not_written(self):
+        written = self.tmp / "tags" / "empty.m4a"
+        convert.convert_to_m4a(self.config, self.wav, written)
+        calls: list[list[str]] = []
+        real_run = convert._run
+
+        def recording_run(argv: list[str]) -> str:
+            calls.append(list(argv))
+            return real_run(argv)
+
+        with mock.patch.object(convert, "_run", side_effect=recording_run):
+            convert.write_tags(
+                written,
+                {
+                    "artist": "Aphex Twin",
+                    "title": "",
+                    "album": "Selected Ambient Works 85-92",
+                    "track": "1",
+                    "year": "2019",
+                },
+            )
+        arguments = [item for call in calls for item in call]
+        self.assertFalse(
+            [item for item in arguments if item.startswith("title=")],
+            "the empty value never reaches the tool",
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return out
+        tags = probe_tags(written)
+        self.assertEqual(tags.get("artist"), "Aphex Twin")
+        self.assertNotIn("title", tags, "an empty value writes no tag at all")
+        self.assertEqual(tags.get("track"), "1")
+        self.assertEqual(tags.get("year"), "2019")
 
-    # -- tests -----------------------------------------------------------
-    def test_target_path_contract_is_deterministic(self):
-        path = self.target(self.track_a)
-        self.assertEqual(path, self.root / "Nova" / "First Light" / "01 - Alpha.m4a")
-        self.assertEqual(self.target(self.track_b).name, "02 - Beta.m4a")
-        self.assertEqual(self.target(self.track_c).name, "01 - Gamma.m4a")
-        self.assertEqual(path, resolve.target_path(self.config, dict(self.track_a)))
+    # --- AC8 -------------------------------------------------------------
 
-        odd = {
-            "spotify_id": "t-odd",
+    def test_ac8_two_tracks_of_one_album_are_numbered_by_added_at_then_title(self):
+        self.set_likes([ZEBRA, APPLE])
+        self.fake_resolver(
+            {
+                ZEBRA["title"]: (0, str(self.wav), ""),
+                APPLE["title"]: (0, str(self.wav), ""),
+            }
+        )
+        # Resolve in the opposite order to the placement order: the number must
+        # come from added_at/title, not from the order of the calls.
+        apple_result = resolve_module.resolve_track(self.config, APPLE)
+        zebra_result = resolve_module.resolve_track(self.config, ZEBRA)
+        for result in (apple_result, zebra_result):
+            self.assertEqual(tuple(result), TRACK_RESULT_KEYS)
+            self.assertTrue(result["ok"])
+
+        album_dir = self.library_root / "Aphex Twin" / "Two Tracks"
+        placed = sorted(path.name for path in album_dir.iterdir() if path.suffix == ".m4a")
+        self.assertEqual(
+            placed,
+            ["01 - Zebra.m4a", "02 - Apple.m4a"],
+            "added_at 2024-01-01 Zebra is 01 before the earlier title Apple",
+        )
+        self.assertEqual(Path(zebra_result["path"]).name, "01 - Zebra.m4a")
+        self.assertEqual(Path(apple_result["path"]).name, "02 - Apple.m4a")
+
+    # --- AC9 -------------------------------------------------------------
+
+    def test_ac9_one_album_folder_holds_exactly_one_jpeg_cover(self):
+        self.set_likes([ZEBRA, APPLE])
+        self.fake_resolver(
+            {
+                ZEBRA["title"]: (0, str(self.wav), ""),
+                APPLE["title"]: (0, str(self.wav), ""),
+            }
+        )
+        for track in (ZEBRA, APPLE):
+            result = resolve_module.resolve_track(self.config, track)
+            self.assertTrue(result["ok"], result["error"])
+
+        album_dir = self.library_root / "Aphex Twin" / "Two Tracks"
+        covers = [path for path in album_dir.iterdir() if path.name == "cover.jpg"]
+        self.assertEqual(len(covers), 1, "exactly one cover.jpg")
+        cover = covers[0]
+        data = cover.read_bytes()
+        self.assertTrue(data.startswith(b"\xff\xd8\xff"), "JPEG magic")
+        self.assertTrue(data.endswith(b"\xff\xd9"), "JPEG end marker")
+        self.assertTrue(convert.is_jpeg(cover))
+        self.assertEqual(
+            [path.name for path in album_dir.iterdir() if path.suffix.lower() in {".jpg", ".jpeg"}],
+            ["cover.jpg"],
+        )
+        # A second ensure_cover run keeps the same, single file.
+        self.assertEqual(convert.ensure_cover(album_dir), cover)
+
+    def test_ac9_is_jpeg_needs_both_magic_bytes(self):
+        neither = self.tmp / "neither.jpg"
+        neither.write_bytes(b"this is not an image at all")
+        self.assertFalse(convert.is_jpeg(neither))
+
+        starts_only = self.tmp / "starts_only.jpg"
+        starts_only.write_bytes(b"\xff\xd8\xff" + b"payload without an end marker")
+        self.assertFalse(
+            convert.is_jpeg(starts_only),
+            "starting like a JPEG is not enough",
+        )
+
+        both = self.tmp / "both.jpg"
+        both.write_bytes(b"\xff\xd8\xff" + b"payload" + b"\xff\xd9")
+        self.assertTrue(convert.is_jpeg(both))
+
+    def test_ac9_is_jpeg_rejects_a_file_that_only_ends_like_one(self):
+        ends_only = self.tmp / "ends_only.jpg"
+        ends_only.write_bytes(b"not an image" + b"\xff\xd9")
+        self.assertFalse(
+            convert.is_jpeg(ends_only),
+            "ending like a JPEG is not enough",
+        )
+
+    # --- AC10 ------------------------------------------------------------
+
+    def test_ac10_the_duration_ffprobe_reports_for_the_m4a_is_recorded(self):
+        written = self.tmp / "probe" / "in.m4a"
+        convert.convert_to_m4a(self.config, self.wav, written)
+        self.assertTrue(written.is_file())
+
+        source_seconds = convert.probe_duration(self.wav)
+        written_seconds = convert.probe_duration(written)
+        self.assertAlmostEqual(source_seconds, 1.0, delta=0.05)
+        self.assertAlmostEqual(written_seconds, source_seconds, delta=0.12)
+        self.assertEqual(
+            convert.recorded_duration(written),
+            written_seconds,
+            "convert_to_m4a records what ffprobe reported for the file it wrote",
+        )
+
+        result = resolve_module.resolve_track(self.config, XTAL)
+        self.assertEqual(tuple(result), TRACK_RESULT_KEYS)
+        placed_seconds = convert.recorded_duration(Path(result["path"]))
+        self.assertIsNotNone(placed_seconds, "the placed .m4a has a recorded duration")
+        self.assertAlmostEqual(placed_seconds, convert.probe_duration(Path(result["path"])), delta=0.001)
+
+    def test_ac10_result_carries_the_duration_ffprobe_reports(self):
+        two_seconds = self.make_wav(self.media / "two-seconds.wav", seconds=2.0)
+        self.set_likes([XTAL])
+        self.fake_resolver({XTAL["title"]: (0, str(two_seconds), "")})
+
+        result = resolve_module.resolve_track(self.config, XTAL)
+        self.assertEqual(tuple(result), TRACK_RESULT_KEYS)
+        self.assertTrue(result["ok"], result["error"])
+        self.assertIsInstance(result["duration"], float)
+        self.assertGreaterEqual(result["duration"], 1.9)
+        self.assertLessEqual(result["duration"], 2.2)
+        self.assertAlmostEqual(
+            result["duration"],
+            convert.probe_duration(Path(result["path"])),
+            delta=0.001,
+        )
+
+        # A second resolve of the same track finds the file gone and converts
+        # again; the duration still has to cross the seam.  (A destination that
+        # still holds a file is refused instead — AC37.)
+        Path(result["path"]).unlink()
+        convert.DURATIONS.clear()
+        again = resolve_module.resolve_track(self.config, XTAL)
+        self.assertEqual(tuple(again), TRACK_RESULT_KEYS)
+        self.assertTrue(again["ok"], again["error"])
+        self.assertIsInstance(again["duration"], float)
+        self.assertGreaterEqual(again["duration"], 1.9)
+        self.assertLessEqual(again["duration"], 2.2)
+
+    def test_ac10_a_silent_tool_failure_names_the_exit_code(self):
+        with self.assertRaises(RuntimeError) as caught:
+            convert._run(["sh", "-c", "exit 3"])
+        text = str(caught.exception)
+        self.assertIn(
+            "exit 3",
+            text,
+            "a tool that fails and says nothing is named by its exit code",
+        )
+
+    # --- AC11 ------------------------------------------------------------
+
+    def test_ac11_a_non_zero_exit_yields_a_failed_result_with_stderr_and_the_run_goes_on(self):
+        self.set_likes([BAD, GOOD])
+        self.fake_resolver(
+            {
+                BAD["title"]: (3, "", "resolver could not find Bad\n"),
+                GOOD["title"]: (0, str(self.wav), ""),
+            }
+        )
+        results = resolve_module.resolve_pending(self.config, [BAD, GOOD])
+        self.assertEqual(len(results), 2)
+        for result in results:
+            self.assertEqual(tuple(result), TRACK_RESULT_KEYS)
+
+        failed, placed = results
+        self.assertEqual(failed["spotify_id"], BAD["spotify_id"])
+        self.assertFalse(failed["ok"])
+        self.assertIsNone(failed["path"])
+        self.assertIsNone(failed["source"])
+        self.assertEqual(failed["error"], "resolver could not find Bad")
+
+        self.assertEqual(placed["spotify_id"], GOOD["spotify_id"])
+        self.assertTrue(placed["ok"], placed["error"])
+        self.assertTrue(Path(placed["path"]).is_file())
+        self.assertEqual(len(self.recorded_argv()), 2, "the loop continued")
+
+    # --- AC34 ------------------------------------------------------------
+
+    def test_ac34_a_symlink_at_the_destination_is_refused_and_nothing_lands_outside(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        target = outside / "target.m4a"
+        target.write_bytes(b"outside-bytes")
+
+        xtal_dir = self.library_root / "Aphex Twin" / "Selected Ambient Works 85-92"
+        xtal_dir.mkdir(parents=True)
+        (xtal_dir / "01 - Xtal.m4a").symlink_to(target)
+
+        good_dir = (
+            self.library_root
+            / "Boards of Canada"
+            / "Music Has the Right to Children"
+        )
+        good_dir.mkdir(parents=True)
+        dangling = outside / "never-written.m4a"
+        (good_dir / "01 - Roygbiv.m4a").symlink_to(dangling)
+
+        self.set_likes([XTAL, GOOD])
+        self.fake_resolver(
+            {
+                XTAL["title"]: (0, str(self.wav), ""),
+                GOOD["title"]: (0, str(self.wav), ""),
+            }
+        )
+
+        results = resolve_module.resolve_pending(self.config, [XTAL, GOOD])
+        self.assertEqual(len(results), 2)
+        for result in results:
+            self.assertEqual(tuple(result), TRACK_RESULT_KEYS)
+            self.assertFalse(result["ok"], "a symlinked destination is refused")
+            self.assertIsNone(result["path"])
+            self.assertIn("destination", result["error"])
+
+        self.assertEqual(len(self.recorded_argv()), 2, "the resolver ran anyway")
+        self.assertEqual(target.read_bytes(), b"outside-bytes", "the link target is untouched")
+        self.assertFalse(
+            dangling.exists(),
+            "a dangling symlink is not created through",
+        )
+        self.assertEqual(sorted(path.name for path in outside.iterdir()), ["target.m4a"])
+        self.assertTrue((xtal_dir / "01 - Xtal.m4a").is_symlink())
+        self.assertTrue((good_dir / "01 - Roygbiv.m4a").is_symlink())
+        self.assertEqual(sorted(path.name for path in xtal_dir.iterdir()), ["01 - Xtal.m4a"])
+        self.assertEqual(
+            sorted(path.name for path in good_dir.iterdir()), ["01 - Roygbiv.m4a"]
+        )
+
+    # --- AC35 ------------------------------------------------------------
+
+    def test_ac35_a_symlinked_album_component_is_not_followed_and_the_track_fails(self):
+        outside = self.tmp / "outside-albums"
+        outside.mkdir()
+        self.library_root.mkdir(parents=True, exist_ok=True)
+        (self.library_root / "Aphex Twin").symlink_to(outside)
+
+        result = resolve_module.resolve_track(self.config, XTAL)
+        self.assertEqual(tuple(result), TRACK_RESULT_KEYS)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["path"])
+        self.assertIn("symlink", result["error"])
+        self.assertEqual(
+            self.recorded_argv(),
+            [["Aphex Twin", "Xtal", "Selected Ambient Works 85-92"]],
+            "the resolver is called before the destination is refused",
+        )
+        self.assertEqual(
+            list(outside.iterdir()), [], "nothing was placed through the symlink"
+        )
+
+        conn = store.open_index(self.config)
+        try:
+            store.upsert_track(conn, {key: XTAL[key] for key in LIKES_KEYS})
+            store.record_result(conn, result)
+            row = store.get_track(conn, XTAL["spotify_id"])
+        finally:
+            conn.close()
+        self.assertEqual(row["status"], contract.STATUS_FAILED)
+        self.assertEqual(row["attempts"], 1)
+        self.assertIn("symlink", row["error"])
+        self.assertIsNone(row["path"])
+
+    # --- AC36 ------------------------------------------------------------
+
+    def test_ac36_a_symlinked_cover_is_replaced_by_the_albums_own_regular_cover(self):
+        outside = self.tmp / "outside-art"
+        outside.mkdir()
+        target = outside / "artwork.jpg"
+        original = b"\xff\xd8\xff" + b"artwork bytes" + b"\xff\xd9"
+        target.write_bytes(original)
+
+        album_dir = (
+            self.library_root / "Aphex Twin" / "Selected Ambient Works 85-92"
+        )
+        album_dir.mkdir(parents=True)
+        (album_dir / "cover.jpg").symlink_to(target)
+
+        result = resolve_module.resolve_track(self.config, XTAL)
+        self.assertTrue(result["ok"], result["error"])
+        self.assertEqual(Path(result["path"]).parent, album_dir)
+
+        cover = album_dir / "cover.jpg"
+        self.assertFalse(cover.is_symlink(), "the album has a cover.jpg of its own")
+        self.assertTrue(cover.is_file())
+        self.assertTrue(convert.is_jpeg(cover), "a regular JPEG in the album")
+        self.assertEqual(
+            target.read_bytes(), original, "the link's target keeps its bytes"
+        )
+        self.assertEqual(
+            [path.name for path in album_dir.iterdir() if path.name == "cover.jpg"],
+            ["cover.jpg"],
+        )
+
+    # --- AC37 ------------------------------------------------------------
+
+    def test_ac37_a_file_at_the_destination_is_not_reported_as_the_fetched_track(self):
+        album_dir = (
+            self.library_root / "Aphex Twin" / "Selected Ambient Works 85-92"
+        )
+        album_dir.mkdir(parents=True)
+        destination = album_dir / "01 - Xtal.m4a"
+        destination.write_bytes(b"someone else's file")
+
+        result = resolve_module.resolve_track(self.config, XTAL)
+        self.assertEqual(tuple(result), TRACK_RESULT_KEYS)
+        self.assertEqual(
+            len(self.recorded_argv()), 1, "the resolver is called anyway"
+        )
+        self.assertFalse(result["ok"], "the pre-existing file never yields ok")
+        self.assertIsNone(result["path"])
+        self.assertIn("destination", result["error"])
+        self.assertEqual(destination.read_bytes(), b"someone else's file")
+        self.assertEqual(
+            sorted(path.name for path in album_dir.iterdir()),
+            ["01 - Xtal.m4a"],
+            "nothing was added beside the pre-existing file",
+        )
+
+        conn = store.open_index(self.config)
+        try:
+            store.upsert_track(conn, {key: XTAL[key] for key in LIKES_KEYS})
+            store.record_result(conn, result)
+            row = store.get_track(conn, XTAL["spotify_id"])
+        finally:
+            conn.close()
+        self.assertEqual(row["status"], contract.STATUS_FAILED)
+        self.assertNotEqual(row["status"], contract.STATUS_OK)
+        self.assertEqual(row["path"], None)
+    # --- AC38 ------------------------------------------------------------
+
+    def test_ac38_tracks_that_differ_only_in_a_rewritten_character_keep_distinct_paths(self):
+        slash = {
+            "spotify_id": "sp-slash",
             "artist": "AC/DC",
-            "title": "Back/In Black",
-            "album": "Live/Night",
+            "title": "Back In Black",
+            "album": "Live",
             "added_at": "2024-01-01T00:00:00Z",
         }
-        odd_path = resolve.target_path(self.config, odd)
-        self.assertEqual(odd_path.parent.parent.name, "AC_DC")
-        self.assertEqual(odd_path.parent.name, "Live_Night")
-        self.assertEqual(odd_path.name, "01 - Back_In Black.m4a")
-        self.assertEqual(odd_path, resolve.target_path(self.config, odd))
+        # "AC/DC" and "AC_DC" differ only in a character ``sanitize`` rewrites
+        # to ``_``: the second track used to land on the first track's file.
+        underscore = {
+            "spotify_id": "sp-underscore",
+            "artist": "AC_DC",
+            "title": "Back In Black",
+            "album": "Live",
+            "added_at": "2024-01-02T00:00:00Z",
+        }
+        self.set_likes([slash, underscore])
+        self.fake_resolver({slash["title"]: (0, str(self.wav), "")})
 
-        # no likes.json at all -> still a deterministic "01"
-        empty_config = dict(self.config, state=str(self.base / "no-state"))
-        fallback = resolve.target_path(empty_config, odd)
-        self.assertEqual(fallback.name, "01 - Back_In Black.m4a")
-
-    def test_probe_duration_reads_the_real_wav(self):
-        self.assertAlmostEqual(convert.probe_duration(self.wav_a), 2.0, delta=0.05)
-
-    def test_resolve_one_converts_places_and_tags(self):
-        result = resolve.resolve_one(
-            self.config, self.track_a, resolve.FakeResolver(str(self.root))
+        slash_result = resolve_module.resolve_track(self.config, slash)
+        underscore_result = resolve_module.resolve_track(self.config, underscore)
+        for result in (slash_result, underscore_result):
+            self.assertEqual(tuple(result), TRACK_RESULT_KEYS)
+            self.assertTrue(result["ok"], result["error"])
+        self.assertNotEqual(
+            slash_result["path"],
+            underscore_result["path"],
+            "AC/DC and AC_DC are two names, so two files",
         )
-        self.assertTrue(result.ok, result.error)
-        final = pathlib.Path(result.path)
-        self.assertEqual(final, self.target(self.track_a))
-        self.assertTrue(final.exists())
-        self.assertEqual(final.suffix, ".m4a")
-
-        info = ffprobe_json(final)
-        self.assertIn("m4a", info["format"]["format_name"])
-        audio = [s for s in info["streams"] if s["codec_type"] == "audio"]
-        self.assertEqual(len(audio), 1)
-        self.assertEqual(audio[0]["codec_name"], "aac")
-        self.assertAlmostEqual(float(info["format"]["duration"]), 2.0, delta=0.3)
-
-        tags = {key.lower(): value for key, value in info["format"]["tags"].items()}
-        self.assertEqual(tags["artist"], "Nova")
-        self.assertEqual(tags["title"], "Alpha")
-        self.assertEqual(tags["album"], "First Light")
-        self.assertEqual(int(str(tags["track"]).split("/")[0]), 1)
-        self.assertEqual(tags.get("date"), "2024")
-
-        # The cover comes from the album, and a .fakes source has no art: no file.
-        self.assertFalse((final.parent / "cover.jpg").exists())
-
-    def test_cover_once_per_album_and_skipped_without_art(self):
-        art_src = self.source_with_art()
-
-        first = resolve.resolve_one(self.config, self.track_a, StaticResolver(art_src))
-        self.assertTrue(first.ok, first.error)
-        album_dir = self.target(self.track_a).parent
-        cover = album_dir / "cover.jpg"
-        self.assertTrue(cover.exists())
-        self.assertEqual(cover.read_bytes()[:2], b"\xff\xd8")  # a JPEG
-        self.assertGreater(cover.stat().st_size, 0)
-
-        cover_mtime = cover.stat().st_mtime_ns
-        cover_size = cover.stat().st_size
-
-        second = resolve.resolve_one(self.config, self.track_b, StaticResolver(art_src))
-        self.assertTrue(second.ok, second.error)
-        self.assertTrue(self.target(self.track_b).exists())
-        self.assertEqual(cover.stat().st_mtime_ns, cover_mtime)
-        self.assertEqual(cover.stat().st_size, cover_size)
-
-        # audio-only source: no art is not a failure, and no cover is invented
-        silent_album = resolve.resolve_one(
-            self.config, self.track_c, resolve.FakeResolver(str(self.root))
+        self.assertNotEqual(
+            resolve_module.album_dir_for(self.config, slash),
+            resolve_module.album_dir_for(self.config, underscore),
         )
-        self.assertTrue(silent_album.ok, silent_album.error)
-        other_dir = self.target(self.track_c).parent
-        self.assertTrue(other_dir.exists())
-        self.assertFalse((other_dir / "cover.jpg").exists())
+        for track, result in (
+            (slash, slash_result),
+            (underscore, underscore_result),
+        ):
+            placed = Path(result["path"])
+            self.assertTrue(placed.is_file())
+            self.assertEqual(
+                probe_tags(placed).get("artist"),
+                track["artist"],
+                "neither track claims the other's file",
+            )
 
-    def test_failed_resolve_is_a_value_and_batch_continues(self):
-        resolver = resolve.FakeResolver(str(self.root), fail_titles=("Alpha",))
-        results = [
-            resolve.resolve_one(self.config, track, resolver)
-            for track in (self.track_a, self.track_b)
-        ]
-        first, second = results
-        self.assertFalse(first.ok)
-        self.assertIsNone(first.path)
-        self.assertTrue(first.error)
-        self.assertIn("Alpha", first.error)
-        self.assertTrue(second.ok, second.error)
-        self.assertTrue(pathlib.Path(second.path).exists())
-        self.assertFalse(self.target(self.track_a).exists())
-
-    def test_existing_target_is_never_overwritten(self):
-        first = resolve.resolve_one(
-            self.config, self.track_a, resolve.FakeResolver(str(self.root))
+        # The title is a rewritten component too, at one fixed album position.
+        one = dict(slash, title="Rock/N/Roll")
+        two = dict(slash, spotify_id="sp-underscore-title", title="Rock_N_Roll")
+        self.assertNotEqual(
+            resolve_module.sanitize(one["title"]),
+            resolve_module.sanitize(two["title"]),
+            "one name encodes to _u2f_, the other keeps its underscore",
         )
-        self.assertTrue(first.ok, first.error)
-        target = pathlib.Path(first.path)
-        before = target.stat()
-        before_bytes = target.read_bytes()
-
-        # A different source would produce different bytes if it were placed.
-        second = resolve.resolve_one(self.config, self.track_a, StaticResolver(self.wav_b))
-        self.assertTrue(second.ok, second.error)
-        self.assertEqual(second.path, str(target))
-        after = target.stat()
-        self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
-        self.assertEqual(after.st_size, before.st_size)
-        self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(),
-                         hashlib.sha256(before_bytes).hexdigest())
-
-    def test_convert_refuses_an_existing_destination(self):
-        dst = self.base / "already.m4a"
-        dst.write_bytes(b"keep me")
-        with self.assertRaises(FileExistsError):
-            convert.convert_to_m4a(self.config, self.wav_a, dst)
-        self.assertEqual(dst.read_bytes(), b"keep me")
-
-    def test_write_cover_returns_none_for_audio_only_source(self):
-        album_dir = self.base / "NoArtAlbum"
-        self.assertIsNone(convert.write_cover(self.config, album_dir, self.wav_a))
-        self.assertFalse((album_dir / "cover.jpg").exists())
-
-    def test_command_resolver_success_and_failure(self):
-        ok = resolve.CommandResolver(
-            sys.executable, ["-c", f"import sys; print({str(self.wav_a)!r})"]
-        ).resolve("Nova", "Alpha", "First Light")
-        self.assertTrue(ok.ok, ok.error)
-        self.assertEqual(ok.path, str(self.wav_a))
-        self.assertEqual(ok.source, sys.executable)
-
-        failing = resolve.CommandResolver(
-            sys.executable,
-            ["-c", "import sys; sys.stderr.write('boom: nothing found\\n'); sys.exit(3)"],
-        ).resolve("Nova", "Alpha", "First Light")
-        self.assertFalse(failing.ok)
-        self.assertIsNone(failing.path)
-        self.assertIn("boom: nothing found", failing.error)
-        self.assertIn("3", failing.error)
-
-        missing = resolve.CommandResolver(
-            sys.executable, ["-c", "print('/definitely/not/here.m4a')"]
-        ).resolve("Nova", "Alpha", "First Light")
-        self.assertFalse(missing.ok)
-        self.assertIn("does not exist", missing.error)
-
-    def test_make_resolver_selects_fake_and_command(self):
-        fake = resolve.make_resolver(self.config)
-        self.assertIsInstance(fake, resolve.FakeResolver)
-        self.assertEqual(fake.root, self.root)
-
-        command = resolve.make_resolver(
-            dict(self.config, resolver="yt-dlp", resolver_args=["--no-playlist"])
+        self.assertNotEqual(
+            resolve_module.library_path(self.config, one, 1),
+            resolve_module.library_path(self.config, two, 1),
+            "a rewritten title character yields a distinct file name",
         )
-        self.assertIsInstance(command, resolve.CommandResolver)
-        self.assertEqual(command.command, "yt-dlp")
-        self.assertEqual(command.extra, ["--no-playlist"])
+        self.assertEqual(
+            len(
+                {
+                    resolve_module.sanitize("AC/DC"),
+                    resolve_module.sanitize("AC_DC"),
+                    resolve_module.sanitize("AC-DC"),
+                    resolve_module.sanitize("AC\\\\DC"),
+                }
+            ),
+            4,
+            "four spellings sanitize to four different components",
+        )
+
+    def test_ac38_an_unavoidable_collision_fails_the_later_track_instead_of_taking_the_file(self):
+        first = {
+            "spotify_id": "sp-twin-a",
+            "artist": "Aphex Twin",
+            "title": "Xtal",
+            "album": "Selected Ambient Works 85-92",
+            "added_at": "2024-01-01T00:00:00Z",
+        }
+        # Two different tracks whose artist, title and album are identical: no
+        # spelling of the name can tell them apart, and both like entries give
+        # the same album position.
+        second = dict(first, spotify_id="sp-twin-b")
+        self.set_likes([second])
+        self.fake_resolver({first["title"]: (0, str(self.wav), "")})
+
+        placed = resolve_module.resolve_track(self.config, first)
+        self.assertEqual(tuple(placed), TRACK_RESULT_KEYS)
+        self.assertTrue(placed["ok"], placed["error"])
+        taken = Path(placed["path"])
+        self.assertTrue(taken.is_file())
+        before = taken.read_bytes()
+
+        later = resolve_module.resolve_track(self.config, second)
+        self.assertEqual(tuple(later), TRACK_RESULT_KEYS)
+        self.assertEqual(later["spotify_id"], second["spotify_id"])
+        self.assertFalse(later["ok"], "the later track never claims the file")
+        self.assertIsNone(later["path"])
+        self.assertIsNone(later["source"])
+        self.assertIsNone(later["duration"])
+        # The reason names the refusal, not the word "collision": the destination guard of AC37 answers
+        # this case and its message names the path. The behaviour AC38 asks for is the line above —
+        # the later track claims nothing and the first track's file is untouched.
+        self.assertIn("refusing", later["error"])
+        self.assertIn(str(taken), later["error"])
+        self.assertEqual(taken.read_bytes(), before, "the first track's file is untouched")
+        self.assertEqual(
+            sorted(path.name for path in taken.parent.iterdir() if path.suffix == ".m4a"),
+            [taken.name],
+            "the later track added no file of its own",
+        )
+        self.assertEqual(len(self.recorded_argv()), 2, "the resolver ran for both")
+
+    # --- the double ------------------------------------------------------
+
+    def test_fake_resolver_is_offline_and_reports_a_miss_as_a_failure(self):
+        sources = {
+            "\0".join((XTAL["artist"], XTAL["title"], XTAL["album"])): self.wav,
+            "\0".join((GOOD["artist"], GOOD["title"], GOOD["album"])): {
+                "path": self.wav,
+                "spotify_id": GOOD["spotify_id"],
+            },
+        }
+        fake = resolve_module.FakeResolver(self.config, sources)
+        hit = fake.resolve(XTAL["artist"], XTAL["title"], XTAL["album"])
+        self.assertEqual(tuple(hit), TRACK_RESULT_KEYS)
+        self.assertTrue(hit["ok"])
+        self.assertEqual(hit["path"], str(self.wav))
+        self.assertEqual(hit["source"], str(self.wav))
+        self.assertFalse(
+            self.library_root.exists(), "the double never touches library_root"
+        )
+
+        second = fake.resolve(GOOD["artist"], GOOD["title"], GOOD["album"])
+        self.assertEqual(tuple(second), TRACK_RESULT_KEYS)
+        self.assertTrue(second["ok"])
+        self.assertEqual(second["spotify_id"], GOOD["spotify_id"])
+
+        miss = fake.resolve("Nobody", "Nothing", "Nowhere")
+        self.assertEqual(tuple(miss), TRACK_RESULT_KEYS)
+        self.assertFalse(miss["ok"])
+        self.assertIsNone(miss["path"])
+        self.assertTrue(miss["error"])
+        self.assertEqual(resolve_module.FakeResolver(self.config).resolve("A", "T", "Al")["ok"], False)
+
+
+class TestFakeResolverCommand(unittest.TestCase):
+    """AC40: ``MUSIC_RESOLVER=fake`` answers without a download tool."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="fake-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.library_root = self.tmp / "library"
+        self.config = {
+            "library_root": str(self.library_root),
+            "state_dir": str(self.tmp / "state"),
+            "resolver": "fake",
+            "spotify_export": str(self.tmp / "liked.json"),
+        }
+
+    def test_ac40_the_fake_resolver_places_a_tone(self):
+        result = resolve_module.resolve_track(self.config, dict(XTAL))
+        self.assertEqual(tuple(result), TRACK_RESULT_KEYS)
+        self.assertTrue(result["ok"], result["error"])
+        placed = Path(result["path"])
+        self.assertTrue(placed.is_file())
+        self.assertEqual(placed.suffix, ".m4a")
+        self.assertTrue(placed.is_relative_to(self.library_root))
+        self.assertGreater(result["duration"] or 0, 0)
 
 
 if __name__ == "__main__":

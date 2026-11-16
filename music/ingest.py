@@ -1,277 +1,245 @@
-"""Collect the user's liked tracks and merge them into ``<state>/likes.json``.
+"""The Spotify adapter and the merge into ``<state_dir>/likes.json``.
 
-Two read paths, one shape: the ``spotify`` CLI when it is on PATH, otherwise a
-JSON export.  Everything written here is the five-key track dict from the
-shared contract, and ``added_at`` is never ``None``.
+Two sources, one shape (AC1, AC2): the ``spotify liked --json`` CLI when it is
+on ``PATH``, otherwise the JSON export named by ``config["spotify_export"]``.
+Both yield objects with exactly :data:`music._contract.LIKES_KEYS`.
+
+``ingest()`` merges what the source yielded into ``<state_dir>/likes.json``,
+keyed on ``spotify_id``, so a second run on the same source changes nothing
+(AC3, AC4).
 """
 
 from __future__ import annotations
 
-import datetime
-import hashlib
 import json
-import os
-import pathlib
 import shutil
 import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
 
-_STDERR_TAIL = 500
-_PAYLOAD_LIST_KEYS = ("items", "tracks", "likes", "liked")
-_WRAPPED_ROW_KEYS = ("track", "song")
+from music._contract import LIKES_KEYS
 
+#: The executable looked up on ``PATH`` for AC2.
+SPOTIFY_CLI = "spotify"
 
-def media_root(config) -> pathlib.Path:
-    if config and config.get("root"):
-        return pathlib.Path(str(config["root"]))
-    return pathlib.Path(os.environ.get("MUSIC_ROOT") or (pathlib.Path.home() / "Music"))
+#: The arguments of the CLI invocation whose stdout is read (AC2).
+SPOTIFY_ARGS = ("liked", "--json")
 
+#: The identity of one like, taken from the contract, never restated.
+ID_KEY = LIKES_KEYS[0]
 
-def state_dir(config) -> pathlib.Path:
-    if config and config.get("state"):
-        return pathlib.Path(str(config["state"]))
-    return pathlib.Path(os.environ.get("MUSIC_STATE") or (pathlib.Path.cwd() / "state"))
+#: File name inside ``state_dir`` (AC3).
+LIKES_FILENAME = "likes.json"
 
+#: Keys a source may wrap its track object in. A Spotify API dump nests the
+#: track, an episode dump nests the episode (AC1).
+WRAPPER_KEYS = ("track", "episode", "item")
 
-def likes_path(config) -> pathlib.Path:
-    return state_dir(config) / "likes.json"
-
-
-def _tail(text: str | None, limit: int = _STDERR_TAIL) -> str:
-    text = (text or "").strip()
-    if len(text) > limit:
-        text = text[-limit:]
-    return text or "no diagnostic output"
+#: Names a nested playlist entry may use for the value it wraps.
+VALUE_KEYS = ("spotify_id", "id")
 
 
-def _now_iso() -> str:
-    return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+def likes_path(config: dict) -> Path:
+    """``<state_dir>/likes.json`` for ``config`` (AC3)."""
+    return Path(config["state_dir"]) / LIKES_FILENAME
 
 
-def _text(value) -> str:
+def find_spotify_cli() -> str | None:
+    """The ``spotify`` executable on ``PATH``, or ``None`` (AC1, AC2)."""
+    return shutil.which(SPOTIFY_CLI)
+
+
+def _text(value: object) -> str:
+    """A string from a plain value, else ``""``."""
     if value is None:
         return ""
-    if isinstance(value, str):
-        return value.strip()
-    return str(value).strip()
-
-
-def _artist(value) -> str:
-    if isinstance(value, list):
-        names = []
-        for item in value:
-            if isinstance(item, dict):
-                names.append(_text(item.get("name") or item.get("artist")))
-            else:
-                names.append(_text(item))
-        return ", ".join(name for name in names if name)
-    if isinstance(value, dict):
-        return _text(value.get("name") or value.get("artist"))
-    return _text(value)
-
-
-def _album(value) -> str:
-    if isinstance(value, dict):
-        return _text(value.get("name") or value.get("album"))
-    if isinstance(value, list):
-        return _album(value[0]) if value else ""
-    return _text(value)
-
-
-def _first(row: dict, keys) -> str:
-    for key in keys:
-        value = row.get(key)
-        if value not in (None, ""):
-            return _text(value)
+    if isinstance(value, (str, int, float)):
+        return str(value)
     return ""
 
 
-def _local_id(artist: str, title: str, album: str) -> str:
-    digest = hashlib.sha1(f"{artist}|{title}|{album}".encode("utf-8")).hexdigest()
-    return "local-" + digest[:16]
+def _name(value: object) -> str:
+    """A display name from a string, a list of objects or one object (AC1)."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return ", ".join(part for part in (_name(item) for item in value) if part)
+    if isinstance(value, dict):
+        return _text(value.get("name") or value.get("title"))
+    return ""
 
 
-def _row_to_track(row, now: str) -> dict | None:
-    if not isinstance(row, dict):
-        return None
-    inner = row
-    for key in _WRAPPED_ROW_KEYS:
-        if isinstance(row.get(key), dict):
-            inner = row[key]
-            break
-
-    def take(*keys) -> str:
-        for source in (inner, row):
-            value = _first(source, keys)
+def _take(row: dict, inner: dict, *keys: str) -> str:
+    """The first non-empty value of ``keys``, the wrapped object first (AC1)."""
+    for source in (inner, row):
+        for key in keys:
+            value = _text(source.get(key))
             if value:
                 return value
-        return ""
+    return ""
 
-    spotify_id = take("spotify_id", "id")
-    title = take("title", "name")
-    if not spotify_id and not title:
-        return None
 
-    artist = _artist(
-        inner.get("artist") or inner.get("artists") or row.get("artist") or row.get("artists")
-    )
-    album = _album(inner.get("album") or row.get("album"))
-    added_at = take("added_at", "added", "addedAt") or now
+def _entry(raw: object) -> dict:
+    """Normalise one liked-track object to exactly ``LIKES_KEYS``.
 
-    if not spotify_id:
-        spotify_id = _local_id(artist, title, album)
-    if not title:
-        title = ""
-    return {
-        "spotify_id": spotify_id,
-        "artist": artist,
-        "title": title,
-        "album": album,
-        "added_at": added_at,
+    A flat object carrying the five keys is copied as it is. A nested Spotify
+    row — ``{"added_at": …, "track": {"id": …, "name": …, "artists": [...],
+    "album": {...}}}`` — is read through its aliases, so a dump works as well
+    as a hand-written list (AC1).
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"liked entry is not an object: {raw!r}")
+    inner = raw
+    for key in WRAPPER_KEYS:
+        value = raw.get(key)
+        if isinstance(value, dict):
+            inner = value
+            break
+    absent = [key for key in LIKES_KEYS if key not in raw]
+    if not absent:
+        return {
+            key: "" if raw[key] is None else str(raw[key]) for key in LIKES_KEYS
+        }
+    entry = {
+        "spotify_id": _take(raw, inner, *VALUE_KEYS),
+        "artist": _name(
+            inner.get("artist")
+            or inner.get("artists")
+            or raw.get("artist")
+            or raw.get("artists")
+        ),
+        "title": _take(raw, inner, "title", "name"),
+        "album": _name(inner.get("album") or raw.get("album")),
+        "added_at": _take(raw, inner, "added_at", "added", "addedAt")
+        or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
-
-
-def _rows_to_tracks(payload, now: str | None = None) -> list[dict]:
-    now = now or _now_iso()
-    rows = []
-    if isinstance(payload, list):
-        rows = payload
-    elif isinstance(payload, dict):
-        for key in _PAYLOAD_LIST_KEYS:
-            if isinstance(payload.get(key), list):
-                rows = payload[key]
-                break
-    tracks = []
-    seen = set()
-    for row in rows:
-        track = _row_to_track(row, now)
-        if track is None or track["spotify_id"] in seen:
-            continue
-        seen.add(track["spotify_id"])
-        tracks.append(track)
-    return tracks
-
-
-def _collect_export(export) -> dict:
-    path = pathlib.Path(str(export)).expanduser()
-    if not path.exists():
-        raise RuntimeError(f"likes export not found at {path}")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise RuntimeError(f"could not read the likes export at {path}: {exc}") from exc
-    return {"source": "export", "likes": _rows_to_tracks(payload)}
-
-
-def _collect_cli(cli: str, config) -> dict:
-    proc = subprocess.run(
-        [cli, "liked", "--json"], capture_output=True, text=True
-    )
-    if proc.returncode != 0:
-        export = config.get("likes_export") if config else None
-        if export:
-            return _collect_export(export)
-        raise RuntimeError(
-            f"`spotify liked --json` exited with {proc.returncode}: {_tail(proc.stderr)}"
+    if not entry["spotify_id"] and not entry["title"]:
+        raise ValueError(
+            f"liked entry names neither an id nor a title: {raw!r}"
         )
+    return entry
+
+
+def _entries(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        raise ValueError(f"liked tracks are not a JSON list: {raw!r}")
+    return [_entry(item) for item in raw]
+
+
+def parse_spotify_cli(stdout: str) -> list[dict]:
+    """Parse the stdout of ``spotify liked --json`` (AC2)."""
     try:
-        payload = json.loads(proc.stdout)
-    except ValueError as exc:
+        raw = json.loads(stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"spotify printed no JSON list: {exc}") from exc
+    return _entries(raw)
+
+
+def parse_export(path: Path) -> list[dict]:
+    """Parse the JSON export file (AC1)."""
+    path = Path(path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path} holds no JSON list: {exc}") from exc
+    return _entries(raw)
+
+
+def _read_cli(cli: str) -> list[dict]:
+    try:
+        done = subprocess.run(
+            [cli, *SPOTIFY_ARGS], check=False, capture_output=True, text=True
+        )
+    except OSError as exc:
+        raise RuntimeError(f"{cli}: {exc}") from exc
+    if done.returncode != 0:
         raise RuntimeError(
-            f"`spotify liked --json` did not print JSON: {exc}"
-        ) from exc
-    return {"source": "cli", "likes": _rows_to_tracks(payload)}
+            f"{cli} {' '.join(SPOTIFY_ARGS)} exited {done.returncode}: "
+            f"{done.stderr.strip()}"
+        )
+    return parse_spotify_cli(done.stdout)
 
 
-def collect_likes(config) -> dict:
-    """Read liked tracks through the adapter; writes nothing."""
-    cli = shutil.which("spotify")
+def source_likes(config: dict) -> list[dict]:
+    """Read the liked tracks through the adapter (AC1, AC2).
+
+    The CLI wins when ``find_spotify_cli()`` names one; a CLI that fails (non
+    zero exit, unreadable stdout) falls back to the export file, so a broken
+    helper does not cost the run its likes.
+    """
+    cli = find_spotify_cli()
     if cli:
-        return _collect_cli(cli, config)
-    export = config.get("likes_export") if config else None
-    if export:
-        return _collect_export(export)
-    raise RuntimeError(
-        "no likes source: the `spotify` binary is not on PATH and no likes export "
-        "is configured (set MUSIC_LIKES_EXPORT / config['likes_export'] to a Spotify "
-        "likes JSON export, or install the spotify CLI)"
-    )
+        try:
+            return _read_cli(cli)
+        except (RuntimeError, ValueError):
+            pass
+    return parse_export(Path(config["spotify_export"]))
 
 
-def read_likes(config) -> list[dict]:
-    """The stored like list, or ``[]`` when the file does not exist yet."""
+def _dedupe(entries: list[dict]) -> list[dict]:
+    """Drop repeated ``spotify_id``s, keeping the first occurrence's order."""
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for entry in entries:
+        spotify_id = entry[ID_KEY]
+        if spotify_id in seen:
+            continue
+        seen.add(spotify_id)
+        unique.append(entry)
+    return unique
+
+
+def load_likes(config: dict) -> list[dict]:
+    """The likes recorded in ``<state_dir>/likes.json`` (AC3).
+
+    A missing file is an empty list; a corrupt one is an error, not a silent
+    overwrite of whatever is there.
+    """
     path = likes_path(config)
-    if not path.exists():
+    if not path.is_file():
         return []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise RuntimeError(f"could not read {path}: {exc}") from exc
-    if not isinstance(data, list):
-        raise RuntimeError(f"{path} is not a JSON list of tracks")
-    return [dict(item) for item in data if isinstance(item, dict)]
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path} holds no JSON list: {exc}") from exc
+    return _entries(raw)
 
 
-def _normalise_track(track, now: str) -> dict | None:
-    if not isinstance(track, dict):
-        return None
-    spotify_id = _text(track.get("spotify_id"))
-    artist = _text(track.get("artist"))
-    title = _text(track.get("title"))
-    album = _text(track.get("album"))
-    added_at = _text(track.get("added_at")) or now
-    if not spotify_id:
-        if not title:
-            return None
-        spotify_id = _local_id(artist, title, album)
-    return {
-        "spotify_id": spotify_id,
-        "artist": artist,
-        "title": title,
-        "album": album,
-        "added_at": added_at,
-    }
-
-
-def _write_likes(config, tracks: list[dict]) -> None:
-    path = likes_path(config)
+def _dump(path: Path, likes: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}-{os.getpid()}.tmp")
-    try:
-        tmp.write_text(
-            json.dumps(tracks, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    text = json.dumps(likes, indent=2, ensure_ascii=False) + "\n"
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
 
 
-def merge_likes(config, likes) -> int:
-    """Merge ``likes`` into ``state/likes.json``; return how many are new."""
-    existing = read_likes(config)
-    known = {t.get("spotify_id") for t in existing if isinstance(t.get("spotify_id"), str)}
-    now = _now_iso()
-    merged = list(existing)
-    added = 0
-    for item in likes or []:
-        track = _normalise_track(item, now)
-        if track is None or track["spotify_id"] in known:
+def merge_likes(existing: list[dict], fetched: list[dict]) -> tuple[list[dict], int]:
+    """Merge ``fetched`` into ``existing``; returns ``(merged, added)`` (AC4).
+
+    Existing order is kept, new entries are appended in source order, and the
+    ``spotify_id`` is the identity — so a second run adds nothing.
+    """
+    known = {entry[ID_KEY] for entry in existing}
+    added: list[dict] = []
+    for entry in fetched:
+        spotify_id = entry[ID_KEY]
+        if spotify_id in known:
             continue
-        known.add(track["spotify_id"])
-        merged.append(track)
-        added += 1
-    if added or not likes_path(config).exists():
-        _write_likes(config, merged)
-    return added
+        known.add(spotify_id)
+        added.append(entry)
+    return _dedupe(list(existing)) + added, len(added)
 
 
-def ingest(config) -> dict:
-    """collect_likes + merge_likes, with counts for the CLI to report."""
-    collected = collect_likes(config)
-    likes = collected["likes"]
-    added = merge_likes(config, likes)
-    return {
-        "source": collected["source"],
-        "liked": len(likes),
-        "added": added,
-        "total": len(read_likes(config)),
-    }
+def ingest(config: dict) -> dict:
+    """Read the likes and merge them into ``<state_dir>/likes.json``.
+
+    Returns :data:`INGEST_RESULT_KEYS`: ``total`` is what the source yielded
+    after dedupe, ``added`` is how many of those were new to ``likes.json``,
+    ``likes`` is the full merged list.
+    """
+    fetched = _dedupe(source_likes(config))
+    path = likes_path(config)
+    existing = load_likes(config)
+    merged, added = merge_likes(existing, fetched)
+    _dump(path, merged)
+    return {"total": len(fetched), "added": added, "likes": merged}

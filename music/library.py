@@ -1,332 +1,165 @@
-"""Library reconciliation: scan the file tree, sync likes into it, report.
+"""Sync orchestration, the summary line and the report table.
 
-Pipeline modules (``music.ingest``, ``music.resolve``, ``music.convert``) are
-imported lazily inside the functions that need them so that ``scan`` and
-``report`` keep working when the pipeline is not installed.
+``sync`` runs ``SYNC_STEPS`` in the declared order, resolving each step lazily
+inside the call: a test may pass ``{"ingest": ..., "resolve": ..., "scan": ...}``
+of fakes, and only a step that was not supplied is imported from the pipeline
+modules.  That keeps this slice buildable and testable on its own.
 """
 
-from __future__ import annotations
-
-import sqlite3
+import importlib
+import shutil
+import tempfile
 from pathlib import Path
-from typing import Any, Callable, Mapping
 
-from . import store
+from music import _contract as contract
+from music import store
 
-
-# ---------------------------------------------------------------------------
-# small helpers
-# ---------------------------------------------------------------------------
-
-
-def _rows_readonly(config: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Read the index without creating anything; missing index means empty."""
-    try:
-        conn = store.connect(config, readonly=True)
-    except FileNotFoundError:
-        return []
-    try:
-        return store.list_tracks(conn)
-    finally:
-        conn.close()
+#: Module and attribute a step defaults to when ``steps`` does not supply it.
+DEFAULT_STEPS = {
+    "ingest": ("music.ingest", "ingest"),
+    "resolve": ("music.resolve", "resolve_pending"),
+    "scan": ("music.store", "scan"),
+}
 
 
-def _walk_m4a(root: Path) -> list[Path]:
-    if not root.is_dir():
-        return []
-    return sorted(
-        path
-        for path in root.rglob("*")
-        if path.is_file() and path.suffix.lower() == ".m4a"
-    )
+def _step(steps: dict | None, name: str):
+    """The callable for one step: the override first, else the module default."""
+    if steps is not None and steps.get(name) is not None:
+        return steps[name]
+    module_name, attribute = DEFAULT_STEPS[name]
+    module = importlib.import_module(module_name)
+    return getattr(module, attribute)
 
 
-def _file_key(path: Path, root: Path) -> tuple[str, str, str] | None:
-    """Map ``<root>/<Artist>/<Album>/<NN - Title>.m4a`` to a lookup key."""
-    try:
-        relative = path.relative_to(root)
-    except ValueError:
-        return None
-    if len(relative.parts) != 3:
-        return None
-    artist, album, name = relative.parts
-    stem = Path(name).stem
-    title = stem.split(" - ", 1)[1] if " - " in stem else stem
+def summary_line(summary: dict) -> str:
+    """The one summary line of AC12/AC13, exactly."""
     return (
-        artist.strip().casefold(),
-        album.strip().casefold(),
-        title.strip().casefold(),
+        f"added {summary['added']}, "
+        f"missing {summary['missing']}, "
+        f"failed {summary['failed']}"
     )
 
 
-def _row_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
-    return (
-        str(row.get("artist", "")).strip().casefold(),
-        str(row.get("album", "")).strip().casefold(),
-        str(row.get("title", "")).strip().casefold(),
+def _cell(value) -> str:
+    return "" if value is None else str(value)
+
+
+#: The one line that closes the report table (AC17).
+TOTAL_LABEL = "TOTAL"
+
+
+def report_lines(rows: list[dict]) -> list[str]:
+    """Header, one aligned row per album, then the TOTAL row (AC16, AC17)."""
+    header = tuple(contract.REPORT_ROW_KEYS)
+    body = [
+        (
+            _cell(row["artist"]),
+            _cell(row["album"]),
+            str(row["tracks"]),
+            str(row["seconds"]),
+        )
+        for row in rows
+    ]
+    total = (
+        TOTAL_LABEL,
+        "",
+        str(sum(int(row["tracks"]) for row in rows)),
+        str(sum(int(row["seconds"]) for row in rows)),
     )
+    table = [tuple(str(name) for name in header)] + body
+    widths = [max(len(line[index]) for line in table) for index in range(len(header))]
+
+    def render(cells: tuple[str, ...]) -> str:
+        padded = (
+            cell.ljust(width) for cell, width in zip(cells, widths)
+        )
+        return "  ".join(padded).rstrip()
+
+    return [render(table[0])] + [render(cells) for cells in body] + [render(total)]
 
 
-def _path_of(row: Mapping[str, Any]) -> Path | None:
-    raw = row.get("path")
-    return Path(raw) if raw else None
+def _count_missing(conn, likes: list[dict]) -> int:
+    """Liked tracks without a placed file in the library after the run (AC12).
 
-
-def _row_file_exists(row: Mapping[str, Any]) -> bool:
-    path = _path_of(row)
-    return path is not None and path.is_file()
-
-
-def _probe_seconds(path: Path) -> float | None:
-    """Ask the pipeline for a duration; absence of the pipeline is not fatal."""
-    try:
-        from music.convert import probe_duration
-    except ImportError:
-        return None
-    try:
-        return float(probe_duration(str(path)))
-    except Exception:
-        return None
-
-
-# ---------------------------------------------------------------------------
-# scan
-# ---------------------------------------------------------------------------
-
-
-def scan(
-    config: Mapping[str, Any],
-    dry_run: bool = False,
-    on_stray: Callable[[str], None] | None = None,
-) -> dict[str, int]:
-    """Reconcile ``config["root"]`` with the index.
-
-    ``added`` and ``missing`` count rows that change state *during this call*,
-    so a second scan of an unchanged tree reports zeros.  ``failed`` is always
-    zero here: scan never resolves or downloads anything.
+    A regular file is a placed track; a symlink at the stored path is not, so a
+    link can never stand in for a fetched track (AC34, AC35).
     """
-    root = Path(config["root"])
-    conn: sqlite3.Connection | None = None
+    missing = 0
+    seen: set[str] = set()
+    for entry in likes:
+        spotify_id = entry.get("spotify_id")
+        if not spotify_id or spotify_id in seen:
+            continue
+        seen.add(spotify_id)
+        row = store.get_track(conn, spotify_id)
+        if row is None or row["status"] != contract.STATUS_OK:
+            missing += 1
+            continue
+        if not store.path_is_placed(row["path"]):
+            missing += 1
+    return missing
+
+
+def sync(
+    config: dict, dry_run: bool = False, steps: dict | None = None
+) -> dict:
+    """Run ingest, resolve and scan; return ``SYNC_SUMMARY_KEYS`` numbers.
+
+    Always all three steps, in ``SYNC_STEPS`` order, on a dry run too (AC25).
+    A dry run computes the summary a real run on the same state would print
+    (AC13) while writing neither the library tree nor ``state/library.db``
+    (AC14): the index is a private in-memory copy, the resolver is pointed at a
+    throw-away ``library_root``, and ``likes.json`` may still be written by
+    ingest.  A failed track never fails the run (AC15).
+    """
+    ingest_step = _step(steps, "ingest")
+    resolve_step = _step(steps, "resolve")
+    scan_step = _step(steps, "scan")
+
+    tempdir = None
+    run_config = config
     if dry_run:
-        rows = _rows_readonly(config)
-    else:
-        conn = store.connect(config)
-        rows = store.list_tracks(conn)
+        # A private sandbox: the resolver may write files and an index here,
+        # but the real tree and state/library.db stay untouched (AC14).
+        tempdir = tempfile.mkdtemp(prefix="music-dry-run-")
+        run_config = dict(config)
+        run_config["library_root"] = str(Path(tempdir) / "library")
+        run_config["state_dir"] = str(Path(tempdir) / "state")
+        Path(run_config["library_root"]).mkdir(parents=True, exist_ok=True)
+        Path(run_config["state_dir"]).mkdir(parents=True, exist_ok=True)
+        source_db = store.index_path(config)
+        if source_db.exists():
+            shutil.copyfile(source_db, store.index_path(run_config))
 
+    conn = None
+    added = 0
+    failed = 0
+    missing = 0
     try:
-        files = _walk_m4a(root)
-        by_path: dict[str, Path] = {}
-        by_key: dict[tuple[str, str, str], Path] = {}
-        for path in files:
-            by_path[str(path.resolve())] = path
-            key = _file_key(path, root)
-            if key is not None:
-                by_key.setdefault(key, path)
+        ingest_result = ingest_step(config)
+        likes = list(ingest_result.get("likes") or [])
 
-        claimed: set[str] = set()
-        added = 0
-        missing = 0
-        failed = 0
+        conn = store.in_memory_index(config) if dry_run else store.open_index(config)
+        pending = store.pending_tracks(conn, likes)
+        for entry in pending:
+            store.upsert_track(conn, entry)
 
-        for row in rows:
-            spotify_id = row["spotify_id"]
-            match: Path | None = None
-            path = _path_of(row)
-            if path is not None:
-                match = by_path.get(str(path.resolve()))
-                if match is None and path.is_file():
-                    match = path
-            if match is None:
-                match = by_key.get(_row_key(row))
+        results = list(resolve_step(run_config, pending) or [])
+        for result in results:
+            store.record_result(conn, result)
+            if result.get("ok"):
+                added += 1
+            else:
+                failed += 1
 
-            if match is not None:
-                claimed.add(str(match.resolve()))
-                res = str(match.resolve())
-                updates: dict[str, Any] = {}
-                if row["status"] != "ok":
-                    added += 1
-                    updates["status"] = "ok"
-                if row.get("path") != res:
-                    updates["path"] = res
-                if row.get("error") is not None:
-                    updates["error"] = None
-                if not dry_run:
-                    seconds = _probe_seconds(match)
-                    if seconds is not None and abs(
-                        seconds - float(row.get("seconds") or 0.0)
-                    ) > 1e-9:
-                        updates["seconds"] = seconds
-                    if updates:
-                        store.set_result(conn, spotify_id, **updates)
-                continue
-
-            if row.get("path") or row["status"] in ("ok", "missing"):
-                if row["status"] != "missing":
-                    missing += 1
-                    if not dry_run:
-                        store.set_result(conn, spotify_id, status="missing", error=None)
-                elif not dry_run and row.get("error") is not None:
-                    store.set_result(conn, spotify_id, error=None)
-
-        for path in files:
-            if str(path.resolve()) not in claimed and on_stray is not None:
-                on_stray(str(path))
-
-        return {"added": added, "missing": missing, "failed": failed}
+        scan_step(config, conn)
+        missing = _count_missing(conn, likes)
+        if not dry_run:
+            conn.commit()
     finally:
         if conn is not None:
             conn.close()
+        if tempdir is not None:
+            shutil.rmtree(tempdir, ignore_errors=True)
 
-
-# ---------------------------------------------------------------------------
-# sync
-# ---------------------------------------------------------------------------
-
-
-def _make_resolver(config: Mapping[str, Any]) -> Any:
-    try:
-        from music.resolve import make_resolver
-    except ImportError:
-        return None
-    return make_resolver(config)
-
-
-def _apply_success(
-    conn: sqlite3.Connection, spotify_id: str, raw_path: str
-) -> None:
-    path = Path(raw_path)
-    kwargs: dict[str, Any] = {"status": "ok", "path": str(path), "error": None}
-    seconds = _probe_seconds(path)
-    if seconds is not None:
-        kwargs["seconds"] = seconds
-    store.set_result(conn, spotify_id, **kwargs)
-
-
-def _apply_failure(
-    conn: sqlite3.Connection,
-    row: Mapping[str, Any],
-    reason: str,
-    max_attempts: int,
-) -> str:
-    next_attempts = int(row.get("attempts") or 0) + 1
-    status = "parked" if next_attempts >= max_attempts else "failed"
-    store.set_result(
-        conn, row["spotify_id"], status=status, error=reason, bump_attempts=True
-    )
-    return status
-
-
-def _sync_dry_run(config: Mapping[str, Any]) -> dict[str, int]:
-    from music.ingest import collect_likes
-
-    collected = collect_likes(config) or {}
-    likes = list(collected.get("likes") or [])
-    index = {row["spotify_id"]: row for row in _rows_readonly(config)}
-
-    added = 0
-    failed = 0
-    for track in likes:
-        row = index.get(str(track["spotify_id"]))
-        if row is None:
-            added += 1
-            continue
-        if row["status"] == "parked":
-            continue
-        if _row_file_exists(row):
-            if row["status"] != "ok":
-                added += 1
-            continue
-        if row["status"] == "failed":
-            failed += 1
-        added += 1
-
-    scanned = scan(config, dry_run=True)
-    return {"added": added, "missing": scanned["missing"], "failed": failed}
-
-
-def sync(config: Mapping[str, Any], dry_run: bool = False) -> dict[str, int]:
-    """Ingest likes, place anything not on disk yet, then rescan.
-
-    A failure on one track is recorded on that row and never aborts the batch.
-    Parked rows are skipped until someone clears them.  Dry runs are strictly
-    read-only: no likes file, no download, no probe, no database write, no
-    directory creation.
-    """
-    if dry_run:
-        return _sync_dry_run(config)
-
-    from music.ingest import ingest, read_likes
-    from music.resolve import resolve_one
-
-    max_attempts = int(config["max_attempts"])
-    ingest(config)
-    likes = list(read_likes(config) or [])
-
-    conn = store.connect(config)
-    try:
-        for track in likes:
-            store.upsert_track(conn, track)
-
-        resolver = _make_resolver(config)
-        added = 0
-        failed = 0
-
-        for track in likes:
-            spotify_id = str(track["spotify_id"])
-            row = store.get_track(conn, spotify_id)
-            if row is None:
-                continue
-            if row["status"] == "parked":
-                continue
-            if _row_file_exists(row):
-                # The file is already there: never resolve it a second time.
-                if row["status"] != "ok":
-                    _apply_success(conn, spotify_id, str(row["path"]))
-                    added += 1
-                continue
-
-            try:
-                if resolver is not None:
-                    result = resolve_one(config, track, resolver)
-                else:
-                    result = resolve_one(config, track)
-                ok = bool(getattr(result, "ok", False))
-                resolved_path = getattr(result, "path", None)
-                reason = getattr(result, "error", None)
-                if ok and resolved_path and Path(resolved_path).is_file():
-                    _apply_success(conn, spotify_id, str(resolved_path))
-                    added += 1
-                    continue
-                if ok:
-                    reason = reason or f"resolved path does not exist: {resolved_path!r}"
-                else:
-                    reason = reason or "resolve failed"
-            except Exception as exc:  # one bad track must not stop the batch
-                reason = f"{type(exc).__name__}: {exc}"
-
-            _apply_failure(conn, row, str(reason), max_attempts)
-            failed += 1
-
-        scanned = scan(config)
-        added += scanned["added"]
-        missing = scanned["missing"]
-        return {"added": added, "missing": missing, "failed": failed}
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
-# report
-# ---------------------------------------------------------------------------
-
-
-def report(config: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Album totals straight out of ``state/library.db``; never the network."""
-    try:
-        conn = store.connect(config, readonly=True)
-    except FileNotFoundError:
-        return []
-    try:
-        return store.album_rows(conn)
-    finally:
-        conn.close()
+    return {"added": added, "missing": missing, "failed": failed}

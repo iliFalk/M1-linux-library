@@ -1,6 +1,10 @@
+# Real credentials and local configuration — never commit
 .env
+
+# Pipeline state and generated library
 state/
+library/
+
+# Python bytecode
 __pycache__/
 *.pyc
-.worktrees/
-.venv/
