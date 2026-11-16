@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: ffmpeg
+        run: |
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+      - name: docker compose for the shell tests
+        run: docker compose version
+      - name: suite
+        run: python3 -m unittest discover -s tests -v
