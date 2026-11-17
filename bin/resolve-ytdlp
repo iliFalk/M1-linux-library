@@ -57,21 +57,28 @@ done
 
 # Several queries are tried in order: one is not enough. Adding the word
 # "audio" makes YouTube answer with nothing for a number of tracks (exit 0, no
-# file), and a dead first hit is common. `yt:` is a YouTube search, `sc:` a
-# SoundCloud one.
+# file), a first hit is often dead, and some hits need cookies while the next
+# one works. `yt:` is a YouTube search, `yt3:` its first three hits (a failure
+# on one does not stop the next), `sc:` a SoundCloud search.
 reason="no query was tried"
 tried=0
 while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     prefix=${entry%%:*}
     text=${entry#*:}
+    extra=""
     case "$prefix" in
     sc) search="scsearch1:$text" ;;
+    yt3)
+        search="ytsearch3:$text"
+        extra="--playlist-items 1-3 --max-downloads 1"
+        ;;
     *) search="ytsearch1:$text" ;;
     esac
     tried=$((tried + 1))
 
     set +e
+    # shellcheck disable=SC2086 - the extra flags are two words by design
     out=$(
         "$tool" \
             --no-playlist --no-progress --quiet --no-warnings \
@@ -80,6 +87,7 @@ while IFS= read -r entry; do
             -f "bestaudio/best" \
             -x --audio-format best \
             --write-thumbnail --convert-thumbnails jpg \
+            $extra \
             -o "$base.%(ext)s" \
             --print after_move:filepath \
             "$search" 2>&1
@@ -87,12 +95,18 @@ while IFS= read -r entry; do
     status=$?
     set -e
 
-    # --print may add lines; the produced file is the last path-shaped line.
-    file=$(printf '%s\n' "$out" | awk 'NF && $0 ~ /\//' | tail -1)
-    if [ "$status" -eq 0 ] && [ -n "$file" ] && [ -f "$file" ]; then
-        printf '%s\n' "$file"
-        exit 0
-    fi
+    # The artifact decides, not the exit code: a multi-hit search can fail on a
+    # later item after the first one landed (exit 101 with the file in place).
+    for produced in "$base".*; do
+        case "$produced" in
+        *.jpg | *.jpeg | *.png | *.webp | *.part | *.json | *.ytdl) continue ;;
+        esac
+        if [ -s "$produced" ]; then
+            printf '%s\n' "$produced"
+            exit 0
+        fi
+    done
+
     if [ -n "$out" ]; then
         reason=$(printf '%s\n' "$out" | tail -2 | tr '\n' ' ')
     else
@@ -102,6 +116,7 @@ done <<QUERIES
 yt:$artist - $title audio
 yt:$artist - $title
 yt:$artist $title
+yt3:$artist - $title
 sc:$artist - $title
 QUERIES
 

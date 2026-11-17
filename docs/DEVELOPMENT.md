@@ -60,6 +60,11 @@ word `audio` makes YouTube answer with nothing for some tracks (exit 0, no file 
 dead. The result is cached under `${MUSIC_RESOLVER_CACHE:-$HOME/.cache/music-pipeline/resolver}`: the same artist
 and title downloads once, and the thumbnail lands next to the audio, which is where `ensure_cover` looks for it.
 
+A third dependency is easy to miss: recent `yt-dlp` versions need a JavaScript runtime for some YouTube formats
+and print `No supported JavaScript runtime could be found` while still working on others. `deno` (one binary,
+`DENO_INSTALL=/usr/local sh` from deno.land) turns those tracks from `no source` into a download — measured: three
+of four stubborn tracks resolved right after it was installed.
+
 Two environment facts break a resolver under systemd: the unit has no `HOME` and a narrow `PATH`, so the cache
 path and the tool lookup must not depend on them. The unit sets `Environment=HOME=/root` and
 `Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`; without them every track fails
