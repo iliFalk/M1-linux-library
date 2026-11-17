@@ -51,6 +51,23 @@ python3 bin/music sync --adopt
 duration ffprobe reads from it, and then resolves only the rest. Use it when the tree holds files this pipeline
 wrote; never on a tree that came from somewhere else, because a name match is not a proof of identity.
 
+## Getting the likes from Spotify itself
+
+`bin/spotify-fetch` reads the likes and the playlists from the Web API and writes the same two files the CSV reader
+writes. It needs no Premium: a self-registered app now requires the owner to hold Premium, so the pipeline uses the
+public client id of Exportify — a pre-2026 app — through its own PKCE flow.
+
+1. One-time authorization. `mac-pkce.py` runs on the machine that has the browser, serves
+   `http://127.0.0.1:3000/` (the one redirect address that client id has registered), exchanges the code locally and
+   posts the token to the receiver on falknest (`spotify-receiver.py`, port 8899), which writes
+   `/opt/falknest/music-state/spotify.json` with mode 600.
+2. Every run after that: `bin/spotify-fetch --token … --out …` refreshes the token, pages through the API and writes
+   both files. Measured: 1235 likes and 62 playlists in 91 seconds.
+
+`/opt/falknest/music-run.sh` does one unattended cycle — fetch, `sync`, `playlists` — and logs to
+`/opt/falknest/music-state/sync.log` (last 400 lines kept). `spotify-sync.timer` runs it daily at 02:30 UTC
+(03:30 Berlin). Enable or move it with `systemctl enable --now spotify-sync.timer`.
+
 ## Getting the likes from TuneMyMusic
 
 TuneMyMusic exports a whole Spotify library as one CSV: one row per track, with the Spotify id and the ISRC,

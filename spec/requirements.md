@@ -76,6 +76,9 @@ AC41 WHEN `music ingest` runs THE SYSTEM SHALL read the liked tracks into `likes
 AC42 WHEN `music sync` resolves tracks THE SYSTEM SHALL run at most three resolver calls at once, the number set by `MUSIC_CONCURRENCY` between one and three, and SHALL return one result per track in the order of the likes whatever order the calls finish in.
 AC44 WHEN `music playlists --from <file>` runs THE SYSTEM SHALL write one `.m3u` file per playlist of the export into `<library_root>/Playlists`, each holding only the tracks the index marks `ok` with a placed file, and SHALL print one line `name: <N> tracks, <M> missing` per playlist.
 AC46 WHEN `music sync` resolves tracks THE SYSTEM SHALL store each result in the index as soon as the call returns, so a run that dies mid-way keeps every finished track as `ok` and the next run resolves only the rest.
+AC48 WHEN `bin/spotify-fetch` runs THE SYSTEM SHALL read the liked tracks from `GET /me/tracks` and the playlists from `GET /me/playlists` plus each playlist's tracks, and SHALL write `likes.json` and `playlists.json` in the shapes `music sync` and `music playlists` read, one entry per Spotify id, playlist order kept.
+AC49 WHEN `bin/spotify-fetch` runs THE SYSTEM SHALL exchange the stored refresh token for an access token, write the refreshed token back with mode 600, and SHALL fail with the missing key named when the file holds no `refresh_token`.
+
 AC47 WHEN `music sync --adopt` runs and the computed destination of a pending track already holds a regular file THE SYSTEM SHALL record that track `ok` with that path and the duration ffprobe reads, and SHALL NOT call the resolver for it.
 
 AC45 WHEN a playlist entry is written THE SYSTEM SHALL write the track path relative to the playlist file, so the player resolves it against the folder that holds the playlist (`../Artist/Album/file.m4a`), and SHALL name a missing source in the error text.
