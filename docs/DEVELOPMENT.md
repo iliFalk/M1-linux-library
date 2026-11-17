@@ -74,8 +74,10 @@ rest are counted as `missing` and stay out, so a playlist never names a file the
 
 Two details decide whether Navidrome picks the files up:
 
-1. An entry in the file is a path **relative to the music folder** (`Artist/Album/01 - Title.m3u`), not a
-   host path: inside the player the library sits at `/music`. The command writes it that way.
+1. An entry in the file is a path **relative to the playlist file**, because that is what the player resolves it
+   against: `../Artist/Album/01 - Title.m4a`. A host path names nothing (the library sits at `/music` inside the
+   player) and a path written from the music folder alone resolves to `Playlists/Artist/...` and misses every
+   track — measured: 56 playlists imported with 0 tracks before the fix.
 2. Navidrome imports `.m3u` files during its scan, and only once an admin user exists. `PlaylistsPath`
    defaults to anywhere under the music folder, so the `Playlists` folder needs no configuration.
 

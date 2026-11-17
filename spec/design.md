@@ -205,8 +205,10 @@ not cost a resolver call. The export is read with the same row normaliser as the
 both. `playlists.render` maps `spotify_id` to the placed path through the index; a track without an `ok` row
 or without a file is counted and dropped.
 
-The entry is written relative to `library_root` because that folder is mounted at `/music` inside the player.
-Navidrome resolves an `.m3u` entry against its music folder, so a host path would name nothing. The file
+The entry is written relative to the playlist file: Navidrome resolves an `.m3u` line against the folder that
+holds the playlist, not against the music folder. A line written as `Artist/Album/file.m4a` resolves to
+`Playlists/Artist/...` and misses every track (measured: 56 imported playlists, 0 tracks); `../Artist/Album/…`
+resolves. A host path would name nothing at all, because the library sits at `/music` inside the player. The file
 lands in `Playlists/`, which `PlaylistsPath` (default: anywhere under the music folder) already covers.
 
 ## 10. Tags reach a player (AC7)

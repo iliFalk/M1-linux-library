@@ -78,6 +78,6 @@ AC44 WHEN `music playlists --from <file>` runs THE SYSTEM SHALL write one `.m3u`
 AC46 WHEN `music sync` resolves tracks THE SYSTEM SHALL store each result in the index as soon as the call returns, so a run that dies mid-way keeps every finished track as `ok` and the next run resolves only the rest.
 AC47 WHEN `music sync --adopt` runs and the computed destination of a pending track already holds a regular file THE SYSTEM SHALL record that track `ok` with that path and the duration ffprobe reads, and SHALL NOT call the resolver for it.
 
-AC45 WHEN a playlist entry is written THE SYSTEM SHALL write the track path relative to `library_root`, so the player finds the file under its own music folder, and SHALL name a missing source in the error text.
+AC45 WHEN a playlist entry is written THE SYSTEM SHALL write the track path relative to the playlist file, so the player resolves it against the folder that holds the playlist (`../Artist/Album/file.m4a`), and SHALL name a missing source in the error text.
 
 AC43 WHEN `music status` runs THE SYSTEM SHALL print one row per status with its track count (pending, ok, failed, parked) and then one row per failed or parked track with artist, title, album, status, attempts and the resolver's reason. Without an index it SHALL print `no index yet`.

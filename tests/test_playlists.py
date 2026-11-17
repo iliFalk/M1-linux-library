@@ -103,10 +103,10 @@ class PlaylistTestCase(unittest.TestCase):
         self.assertEqual(
             lines[1:],
             [
-                "Aphex Twin/Selected Ambient Works 85-92/01 - Xtal.m4a",
-                "Aphex Twin/Selected Ambient Works 85-92/01 - Tha.m4a",
+                "../Aphex Twin/Selected Ambient Works 85-92/01 - Xtal.m4a",
+                "../Aphex Twin/Selected Ambient Works 85-92/01 - Tha.m4a",
             ],
-            "entries are relative to the music folder (AC45)",
+            "entries are relative to the playlist file, so the player finds them (AC45)",
         )
 
     def test_ac44_the_export_shapes_are_read(self):

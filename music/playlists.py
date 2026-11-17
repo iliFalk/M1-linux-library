@@ -3,9 +3,9 @@
 One playlist of the export becomes one file under
 ``<library_root>/Playlists/<name>.m3u`` (AC44). A track is written only when
 the index holds it with a placed file, so the playlist never names a file the
-library does not have. The file names the tracks relative to ``library_root``:
-Navidrome reads an ``.m3u`` entry relative to its music folder, and the folder
-inside the player is not the host path (AC45).
+library does not have. A line is written relative to the playlist file itself:
+the player resolves it against the folder that holds the playlist, so a track
+one folder up needs ``../Artist/Album/file.m4a`` (AC45).
 
 The export shapes accepted here match the ingest reader: a flat object with the
 five like keys, or a nested Spotify row.
@@ -99,12 +99,21 @@ def playlist_path(config: dict, name: str) -> Path:
     return folder / f"{resolve.sanitize(name)}{PLAYLIST_SUFFIX}"
 
 
-def _relative(library_root: Path, path: str) -> str:
-    """The entry as Navidrome reads it: a path below the music folder (AC45)."""
-    return Path(path).relative_to(library_root).as_posix()
+def _relative(playlist_dir: Path, path: str) -> str:
+    """The entry as Navidrome reads it (AC45).
+
+    The player resolves a playlist line against the folder that holds the
+    playlist file, which is ``<library_root>/Playlists`` — so a track two
+    levels up needs ``../Artist/Album/file.m4a``. A path written from the
+    music folder alone resolves to ``Playlists/Artist/...`` and every line
+    misses.
+    """
+    return os.path.relpath(str(path), str(playlist_dir)).replace(os.sep, "/")
 
 
-def render(tracks: list[dict], placed: dict[str, str], library_root: Path) -> tuple[str, int]:
+def render(
+    tracks: list[dict], placed: dict[str, str], playlist_dir: Path
+) -> tuple[str, int]:
     """The file text and the number of tracks the library does not hold."""
     lines = ["#EXTM3U"]
     missing = 0
@@ -113,7 +122,7 @@ def render(tracks: list[dict], placed: dict[str, str], library_root: Path) -> tu
         if path is None:
             missing += 1
             continue
-        lines.append(_relative(library_root, path))
+        lines.append(_relative(playlist_dir, path))
     return "\n".join(lines) + "\n", missing
 
 
@@ -164,8 +173,8 @@ def build(config: dict, source: Path | str | None = None) -> list[dict]:
 
     rows = []
     for playlist in playlists:
-        text, missing = render(playlist["tracks"], placed, library_root)
         target = playlist_path(config, playlist["name"])
+        text, missing = render(playlist["tracks"], placed, target.parent)
         _write(target, text)
         rows.append(
             {
