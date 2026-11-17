@@ -19,6 +19,31 @@ The resolver contract: the command gets three positional arguments, `<artist> <t
 
 The player is Navidrome. It mounts `MUSIC_LIBRARY_ROOT` read-only at `/music` and serves the folder over the Subsonic API. The player never writes the folder.
 
+## Mixes from the sound
+
+`music features` reads tempo, energy, valence, danceability, acousticness, speechiness and the artist's genres for
+every liked track (batches of 100 and 50; measured: 1235 tracks plus 584 artists in 22 s) and stores them in the
+index. `music mix --from mixes.json` then writes one playlist per rule set:
+
+```json
+"Training Metal": {
+  "require": {"energy": [0.6, 1.0]},
+  "genres_any": ["metal", "metalcore", "thrash"],
+  "sort": [["energy", "desc"], ["tempo", "desc"]],
+  "limit": 60
+}
+```
+
+A rule takes `require` (a min/max per feature), `genres_any` or `genres_none` (substring match against the artist's
+genres), `sort` and `limit`. Only a track the index holds as `ok` with a placed file **and** with stored features can
+enter, so a mix never names a file the player cannot find. An unknown key or feature is an error, not a silent no-op:
+a typo in the rule file would otherwise produce a plausible, wrong playlist.
+
+The numbers are Spotify's estimates, not a measurement of the local file. If the endpoint disappears, the same rule
+file works against locally computed features (`essentia`) once they are stored in the same table.
+
+The nightly cycle runs `features` and `mix` after `sync`, so a new like lands in the right mixes on the next run.
+
 ## A ready resolver
 
 `bin/resolve-ytdlp` implements the resolver contract with yt-dlp, so the pipeline runs without a hand-written
