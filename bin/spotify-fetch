@@ -34,7 +34,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--out", default=".", help="where likes.json and playlists.json go (default: .)"
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="only refresh the token, store it and report: the watcher's cheap probe",
+    )
     args = parser.parse_args(argv)
+
+    if args.check:
+        try:
+            token, refreshed = spotify.access_token(args.token)
+        except (OSError, ValueError, spotify.SpotifyError) as exc:
+            print(f"spotify-fetch: {exc}", file=sys.stderr)
+            return 2
+        spotify.store_token(args.token, refreshed)
+        print(f"token ok: scope={refreshed.get('scope', '')} token_len={len(token)}")
+        return 0
 
     try:
         token, refreshed = spotify.access_token(args.token)

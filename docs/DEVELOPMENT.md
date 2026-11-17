@@ -64,6 +64,9 @@ public client id of Exportify — a pre-2026 app — through its own PKCE flow.
 2. Every run after that: `bin/spotify-fetch --token … --out …` refreshes the token, pages through the API and writes
    both files. Measured: 1235 likes and 62 playlists in 91 seconds.
 
+`bin/spotify-fetch --check` refreshes the token only, stores the rotated one and prints one line — the cheap probe a
+watchdog runs every day to learn whether the authorization still lives.
+
 `/opt/falknest/music-run.sh` does one unattended cycle — fetch, `sync`, `playlists` — and logs to
 `/opt/falknest/music-state/sync.log` (last 400 lines kept). `spotify-sync.timer` runs it daily at 02:30 UTC
 (03:30 Berlin). Enable or move it with `systemctl enable --now spotify-sync.timer`.
