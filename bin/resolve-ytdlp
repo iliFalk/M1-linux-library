@@ -23,15 +23,22 @@ tool=${YTDLP:-}
 if [ -z "$tool" ]; then
     tool=$(command -v yt-dlp || true)
 fi
-if [ -z "$tool" ] && [ -x "$HOME/.local/bin/yt-dlp" ]; then
-    tool=$HOME/.local/bin/yt-dlp
+if [ -z "$tool" ]; then
+    for candidate in "${HOME:-/root}/.local/bin/yt-dlp" /usr/local/bin/yt-dlp /usr/bin/yt-dlp; do
+        if [ -x "$candidate" ]; then
+            tool=$candidate
+            break
+        fi
+    done
 fi
 if [ -z "$tool" ]; then
     echo "resolve-ytdlp: yt-dlp not found; install it or set YTDLP" >&2
     exit 3
 fi
 
-cache=${MUSIC_RESOLVER_CACHE:-$HOME/.cache/music-pipeline/resolver}
+# A service started by systemd carries no HOME, so the cache must not depend on
+# it: the variable wins, then HOME, then the working directory.
+cache=${MUSIC_RESOLVER_CACHE:-${HOME:-$PWD}/.cache/music-pipeline/resolver}
 mkdir -p "$cache"
 
 key=$(printf '%s - %s' "$artist" "$title" | tr -c 'A-Za-z0-9 .\n-' '_' | cut -c1-120)
@@ -48,33 +55,55 @@ for cached in "$base".*; do
     fi
 done
 
-query="$artist - $title audio"
-set +e
-out=$(
-    "$tool" \
-        --no-playlist --no-progress --quiet --no-warnings \
-        --no-simulate --no-part \
-        --ignore-config \
-        -f "bestaudio/best" \
-        -x --audio-format best \
-        --write-thumbnail --convert-thumbnails jpg \
-        -o "$base.%(ext)s" \
-        --print after_move:filepath \
-        "ytsearch1:$query" 2>&1
-)
-status=$?
-set -e
+# Several queries are tried in order: one is not enough. Adding the word
+# "audio" makes YouTube answer with nothing for a number of tracks (exit 0, no
+# file), and a dead first hit is common. `yt:` is a YouTube search, `sc:` a
+# SoundCloud one.
+reason="no query was tried"
+tried=0
+while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    prefix=${entry%%:*}
+    text=${entry#*:}
+    case "$prefix" in
+    sc) search="scsearch1:$text" ;;
+    *) search="ytsearch1:$text" ;;
+    esac
+    tried=$((tried + 1))
 
-if [ "$status" -ne 0 ]; then
-    printf '%s\n' "$out" | tail -3 >&2
-    exit "$status"
-fi
+    set +e
+    out=$(
+        "$tool" \
+            --no-playlist --no-progress --quiet --no-warnings \
+            --no-simulate --no-part \
+            --ignore-config \
+            -f "bestaudio/best" \
+            -x --audio-format best \
+            --write-thumbnail --convert-thumbnails jpg \
+            -o "$base.%(ext)s" \
+            --print after_move:filepath \
+            "$search" 2>&1
+    )
+    status=$?
+    set -e
 
-# --print may add lines; the produced file is the last path-shaped line.
-file=$(printf '%s\n' "$out" | awk 'NF && $0 ~ /\//' | tail -1)
-if [ -z "$file" ] || [ ! -f "$file" ]; then
-    echo "resolve-ytdlp: yt-dlp named no file for $artist - $title" >&2
-    printf '%s\n' "$out" | tail -3 >&2
-    exit 4
-fi
-printf '%s\n' "$file"
+    # --print may add lines; the produced file is the last path-shaped line.
+    file=$(printf '%s\n' "$out" | awk 'NF && $0 ~ /\//' | tail -1)
+    if [ "$status" -eq 0 ] && [ -n "$file" ] && [ -f "$file" ]; then
+        printf '%s\n' "$file"
+        exit 0
+    fi
+    if [ -n "$out" ]; then
+        reason=$(printf '%s\n' "$out" | tail -2 | tr '\n' ' ')
+    else
+        reason="exit $status, no output for $search"
+    fi
+done <<QUERIES
+yt:$artist - $title audio
+yt:$artist - $title
+yt:$artist $title
+sc:$artist - $title
+QUERIES
+
+echo "resolve-ytdlp: no source for $artist - $title after $tried queries ($reason)" >&2
+exit 4

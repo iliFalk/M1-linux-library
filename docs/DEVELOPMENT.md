@@ -53,11 +53,17 @@ script:
 MUSIC_RESOLVER="$PWD/bin/resolve-ytdlp" python3 bin/music sync
 ```
 
-It calls `yt-dlp` from `PATH`, or `~/.local/bin/yt-dlp`, or the binary `YTDLP` names. The search is
-`ytsearch1:<artist> - <title> audio`, and the result is cached under `~/.cache/music-pipeline/resolver`
-(`MUSIC_RESOLVER_CACHE` moves it): the same artist and title downloads once, and the thumbnail lands next to
-the audio, which is where `ensure_cover` looks for it. A cached file answers at once, so a repeated sync costs
-no traffic.
+It calls `yt-dlp` from `PATH`, or `~/.local/bin/yt-dlp`, `/usr/local/bin/yt-dlp`, or the binary `YTDLP` names.
+One query is not enough, so four are tried in order: `ytsearch1:<artist> - <title> audio`, then the same without
+`audio`, then without the dash, then `scsearch1:` on SoundCloud. Measured reason for the ladder: appending the
+word `audio` makes YouTube answer with nothing for some tracks (exit 0, no file at all), and a first hit is often
+dead. The result is cached under `${MUSIC_RESOLVER_CACHE:-$HOME/.cache/music-pipeline/resolver}`: the same artist
+and title downloads once, and the thumbnail lands next to the audio, which is where `ensure_cover` looks for it.
+
+Two environment facts break a resolver under systemd: the unit has no `HOME` and a narrow `PATH`, so the cache
+path and the tool lookup must not depend on them. The unit sets `Environment=HOME=/root` and
+`Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`; without them every track fails
+with `HOME: parameter not set` while a manual run works.
 
 Two limits are worth knowing. The search picks the first result, so a live or remix version can win over the
 album take. And the `year` tag comes from the like date, not from the recording.
