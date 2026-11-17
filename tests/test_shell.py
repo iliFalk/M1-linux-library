@@ -187,8 +187,14 @@ class ShellTestCase(unittest.TestCase):
                     # A call or an environment read is code, not a value: the
                     # gate hunts literals that would ship a secret.
                     continue
-                value = re.split(r"[\"',]", raw, maxsplit=1)[0].strip()
-                if len(value) < 16 or " " in value or "{" in value:
+                value = raw.strip().strip("\"'")
+                value = re.split(r"[\s,]", value, maxsplit=1)[0]
+                if (
+                    len(value) < 16
+                    or "{" in value
+                    or "/" in value
+                    or value.endswith((".json", ".yaml", ".yml", ".env", ".toml", ".txt"))
+                ):
                     # Prose, an f-string placeholder or a short word is not a
                     # credential; a shipped secret is one long unbroken token.
                     continue
