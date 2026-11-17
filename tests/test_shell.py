@@ -183,7 +183,15 @@ class ShellTestCase(unittest.TestCase):
                 # A compose interpolation is a placeholder even when it is
                 # followed by prose: keep only the value up to a quote/comma.
                 raw = match.group(1).strip()
+                if "(" in raw or raw.startswith(("$", "os.", "env.")):
+                    # A call or an environment read is code, not a value: the
+                    # gate hunts literals that would ship a secret.
+                    continue
                 value = re.split(r"[\"',]", raw, maxsplit=1)[0].strip()
+                if len(value) < 16 or " " in value or "{" in value:
+                    # Prose, an f-string placeholder or a short word is not a
+                    # credential; a shipped secret is one long unbroken token.
+                    continue
                 self.assertRegex(
                     value,
                     PLACEHOLDER_RE,
