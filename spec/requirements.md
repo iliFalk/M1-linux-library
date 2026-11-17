@@ -5,7 +5,7 @@ Nothing below the "Surface" block is negotiable; the surface is what makes a cri
 
 ## Surface fixed by this file
 
-CLI: `bin/music [--config <path>] <sync|scan|report|status|ingest|playlists> [--dry-run]`, executable, `python3` shebang.
+CLI: `bin/music [--config <path>] <sync|scan|report|status|ingest|playlists> [--dry-run]`; `sync` also takes `--adopt`., executable, `python3` shebang.
 `--dry-run` applies to `sync`, `scan` and `report`.
 Config file: JSON object with exactly the keys `library_root`, `state_dir`, `resolver`, `spotify_export`.
 `resolver` is a command string (shlex-split, may carry arguments). For one track it is called as
@@ -75,6 +75,9 @@ AC41 WHEN `music ingest` runs THE SYSTEM SHALL read the liked tracks into `likes
 
 AC42 WHEN `music sync` resolves tracks THE SYSTEM SHALL run at most three resolver calls at once, the number set by `MUSIC_CONCURRENCY` between one and three, and SHALL return one result per track in the order of the likes whatever order the calls finish in.
 AC44 WHEN `music playlists --from <file>` runs THE SYSTEM SHALL write one `.m3u` file per playlist of the export into `<library_root>/Playlists`, each holding only the tracks the index marks `ok` with a placed file, and SHALL print one line `name: <N> tracks, <M> missing` per playlist.
+AC46 WHEN `music sync` resolves tracks THE SYSTEM SHALL store each result in the index as soon as the call returns, so a run that dies mid-way keeps every finished track as `ok` and the next run resolves only the rest.
+AC47 WHEN `music sync --adopt` runs and the computed destination of a pending track already holds a regular file THE SYSTEM SHALL record that track `ok` with that path and the duration ffprobe reads, and SHALL NOT call the resolver for it.
+
 AC45 WHEN a playlist entry is written THE SYSTEM SHALL write the track path relative to `library_root`, so the player finds the file under its own music folder, and SHALL name a missing source in the error text.
 
 AC43 WHEN `music status` runs THE SYSTEM SHALL print one row per status with its track count (pending, ok, failed, parked) and then one row per failed or parked track with artist, title, album, status, attempts and the resolver's reason. Without an index it SHALL print `no index yet`.

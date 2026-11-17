@@ -214,3 +214,15 @@ lands in `Playlists/`, which `PlaylistsPath` (default: anywhere under the music 
 `write_tags` writes the iTunes atoms, not the `mdta` box: `-movflags use_metadata_tags` produced a file that
 ffprobe reads and taglib does not, so Navidrome indexed the whole library as `[Unknown Artist]`. The year goes
 through ffmpeg's `date` key, because the muxer only writes `©day` for that name.
+
+## 11. A run that dies (AC46, AC47)
+
+`resolve_pending` takes an optional `on_result` callback and calls it with each result as it arrives, so
+`library.sync` writes it through `store.record_result` at once instead of after the whole list. A reboot or a
+killed session therefore costs at most the calls that were in flight, not the finished tracks.
+
+The files a dead run placed stay in the tree while their rows are still `pending`. On the next run the computed
+destination is occupied, which the guard refuses by design (AC37) — the track would fail three times and park.
+`sync --adopt` is the operator's answer: it records a pending track whose destination holds a regular file as
+`ok` with the duration ffprobe reads, and resolves only the rest. It is opt-in, so the ordinary run keeps the
+refusal that stops one track from claiming another one's file.

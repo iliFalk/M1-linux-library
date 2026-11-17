@@ -334,12 +334,16 @@ def resolve_track(config: dict, track: dict) -> dict:
     )
 
 
-def resolve_pending(config: dict, tracks: list[dict]) -> list[dict]:
+def resolve_pending(
+    config: dict, tracks: list[dict], on_result: "callable | None" = None
+) -> list[dict]:
     """Resolve every track; one failure never stops the rest (AC11).
 
     Up to :func:`workers` resolver calls run at once (AC42). Returns one
     ``TRACK_RESULT_KEYS`` dict per input track, in input order, whatever order
-    the calls finish in.
+    the calls finish in. ``on_result`` is called with each result as it
+    arrives, so a caller can store it before the run ends (AC46): a killed run
+    then loses at most the calls that were in flight.
     """
 
     def one(track: dict) -> dict:
@@ -348,15 +352,20 @@ def resolve_pending(config: dict, tracks: list[dict]) -> list[dict]:
         except Exception as exc:  # noqa: BLE001 - a bad track must not abort the run
             return _failed(track, f"{type(exc).__name__}: {exc}")
 
+    def report(result: dict) -> dict:
+        if on_result is not None:
+            on_result(result)
+        return result
+
     if len(tracks) < 2:
-        return [one(track) for track in tracks]
+        return [report(one(track)) for track in tracks]
     slots: list[dict | None] = [None] * len(tracks)
     with futures.ThreadPoolExecutor(max_workers=workers()) as pool:
         running = {
             pool.submit(one, track): index for index, track in enumerate(tracks)
         }
         for done in futures.as_completed(running):
-            slots[running[done]] = done.result()
+            slots[running[done]] = report(done.result())
     return [result for result in slots if result is not None]
 
 

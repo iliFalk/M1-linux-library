@@ -37,6 +37,20 @@ no traffic.
 Two limits are worth knowing. The search picks the first result, so a live or remix version can win over the
 album take. And the `year` tag comes from the like date, not from the recording.
 
+## Resume after a reboot
+
+`music sync` stores each result the moment the track finishes, so an interrupted run loses at most the calls
+that were in flight. The files it placed stay in the tree, and on the next run their destination is occupied —
+the placement guard refuses that by design.
+
+```sh
+python3 bin/music sync --adopt
+```
+
+`--adopt` records every pending track whose computed destination already holds a regular file as `ok`, with the
+duration ffprobe reads from it, and then resolves only the rest. Use it when the tree holds files this pipeline
+wrote; never on a tree that came from somewhere else, because a name match is not a proof of identity.
+
 ## Getting the likes from TuneMyMusic
 
 TuneMyMusic exports a whole Spotify library as one CSV: one row per track, with the Spotify id and the ISRC,

@@ -8,11 +8,12 @@ modules.  That keeps this slice buildable and testable on its own.
 
 import importlib
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
 from music import _contract as contract
-from music import store
+from music import convert, resolve, store
 
 #: Module and attribute a step defaults to when ``steps`` does not supply it.
 DEFAULT_STEPS = {
@@ -20,6 +21,41 @@ DEFAULT_STEPS = {
     "resolve": ("music.resolve", "resolve_pending"),
     "scan": ("music.store", "scan"),
 }
+
+
+def adopt_placed(config: dict, conn, pending: list[dict]) -> list[dict]:
+    """Record the pending tracks whose destination already holds a file (AC47).
+
+    A run that a reboot, a kill or a lost session interrupted leaves placed
+    files behind while the index still holds those tracks as pending. The next
+    run would treat each of those destinations as taken and fail the track, so
+    the caller opts in with ``--adopt``: the file at the computed destination
+    is taken as this track's own and the row is recorded ``ok`` with the
+    duration ffprobe reads from it. Returns the tracks that still need a
+    resolver call.
+    """
+    remaining = []
+    for entry in pending:
+        destination = resolve.library_path(config, entry)
+        if not store.path_is_placed(str(destination)):
+            remaining.append(entry)
+            continue
+        try:
+            duration = float(convert.probe_duration(destination))
+        except (OSError, RuntimeError):
+            duration = None
+        store.record_result(
+            conn,
+            {
+                "spotify_id": entry["spotify_id"],
+                "ok": True,
+                "path": str(destination),
+                "error": None,
+                "source": None,
+                "duration": duration,
+            },
+        )
+    return remaining
 
 
 def _step(steps: dict | None, name: str):
@@ -139,7 +175,10 @@ def status_lines(counts: list[dict], faults: list[dict]) -> list[str]:
 
 
 def sync(
-    config: dict, dry_run: bool = False, steps: dict | None = None
+    config: dict,
+    dry_run: bool = False,
+    steps: dict | None = None,
+    adopt: bool = False,
 ) -> dict:
     """Run ingest, resolve and scan; return ``SYNC_SUMMARY_KEYS`` numbers.
 
@@ -182,13 +221,32 @@ def sync(
         for entry in pending:
             store.upsert_track(conn, entry)
 
-        results = list(resolve_step(run_config, pending) or [])
-        for result in results:
+        if adopt and not dry_run:
+            before = len(pending)
+            pending = adopt_placed(run_config, conn, pending)
+            adopted = before - len(pending)
+            if adopted:
+                added += adopted
+                print(f"adopted {adopted} placed track(s)", file=sys.stderr)
+
+        stored: set[str] = set()
+
+        def record(result: dict) -> None:
+            """Store one result the moment it arrives (AC46)."""
+            nonlocal added, failed
+            stored.add(str(result.get("spotify_id")))
             store.record_result(conn, result)
             if result.get("ok"):
                 added += 1
             else:
                 failed += 1
+
+        results = list(resolve_step(run_config, pending, on_result=record) or [])
+        for result in results:
+            # A step double may return its list without calling ``record``;
+            # storing the unseen ones keeps the summary and the index right.
+            if str(result.get("spotify_id")) not in stored:
+                record(result)
 
         scan_step(config, conn)
         missing = _count_missing(conn, likes)

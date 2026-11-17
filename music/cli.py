@@ -79,8 +79,13 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="{sync,scan,report,status,ingest,playlists}",
     )
     commands.required = True
-    commands.add_parser(
+    sync_command = commands.add_parser(
         "sync", parents=[common], help="ingest, resolve, then scan"
+    )
+    sync_command.add_argument(
+        "--adopt",
+        action="store_true",
+        help="record files an interrupted run already placed instead of failing them",
     )
     commands.add_parser(
         "scan", parents=[common], help="reconcile the index with the library tree"
@@ -105,8 +110,8 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_sync(config: dict, dry_run: bool) -> int:
-    summary = library.sync(config, dry_run=dry_run)
+def _run_sync(config: dict, dry_run: bool, adopt: bool = False) -> int:
+    summary = library.sync(config, dry_run=dry_run, adopt=adopt)
     print(library.summary_line(summary))
     return 0
 
@@ -179,7 +184,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         return 2
 
     if args.command == "sync":
-        return _run_sync(config, args.dry_run)
+        return _run_sync(config, args.dry_run, getattr(args, "adopt", False))
     if args.command == "scan":
         return _run_scan(config)
     if args.command == "report":

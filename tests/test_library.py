@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from music import _contract as contract
-from music import cli, library, store
+from music import cli, library, resolve, store
 
 
 # --- fakes ----------------------------------------------------------------
@@ -55,7 +55,9 @@ class FakeResolve:
         self.calls: list[list[str]] = []
         self.tracks: list[dict] = []
 
-    def __call__(self, config: dict, tracks: list[dict]) -> list[dict]:
+    def __call__(
+        self, config: dict, tracks: list[dict], on_result=None
+    ) -> list[dict]:
         self.calls.append([track["spotify_id"] for track in tracks])
         self.tracks.extend(tracks)
         if self.touch_index:
@@ -92,6 +94,9 @@ class FakeResolve:
                     "source": str(target),
                 }
             )
+        if on_result is not None:
+            for result in results:
+                on_result(result)
         return results
 
 
@@ -365,6 +370,81 @@ class TestStatusCommand(LibraryTestCase):
         code, out, _err = self.run_main(["status"])
         self.assertEqual(code, 0)
         self.assertEqual(out.strip(), "no index yet")
+
+
+# --- resuming after a killed run -------------------------------------------
+
+
+class TestResume(LibraryTestCase):
+    def write_likes(self, likes: list[dict]) -> None:
+        """Put the likes where the placement code reads them (AC8, AC47)."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "likes.json").write_text(json.dumps(likes), encoding="utf-8")
+
+    def test_ac46_a_result_is_stored_before_the_run_ends(self):
+        """A step that dies mid-run leaves the finished tracks in the index."""
+
+        class DyingResolve(FakeResolve):
+            def __call__(self, config, tracks, on_result=None):
+                first = tracks[0]
+                target = (
+                    Path(config["library_root"])
+                    / str(first["artist"])
+                    / str(first["album"])
+                    / f"{first['title']}.m4a"
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"fake-audio")
+                result = {
+                    "spotify_id": first["spotify_id"],
+                    "ok": True,
+                    "path": str(target),
+                    "error": None,
+                    "source": str(target),
+                }
+                if on_result is not None:
+                    on_result(result)
+                raise RuntimeError("the machine went down")
+
+        likes = [
+            self.like("sp1", "ArtistA", "One", "AlbumX"),
+            self.like("sp2", "ArtistA", "Two", "AlbumX"),
+        ]
+        self.write_likes(likes)
+        steps = {"ingest": FakeIngest(likes), "resolve": DyingResolve(), "scan": store.scan}
+        with self.assertRaises(RuntimeError):
+            library.sync(self.config(), steps=steps)
+        conn = store.open_index(self.config())
+        try:
+            row = store.get_track(conn, "sp1")
+        finally:
+            conn.close()
+        self.assertIsNotNone(row, "the finished track survives the crash")
+        self.assertEqual(row["status"], contract.STATUS_OK)
+
+    def test_ac47_adopt_records_a_file_an_earlier_run_placed(self):
+        likes = [
+            self.like("sp1", "ArtistA", "One", "AlbumX"),
+            self.like("sp2", "ArtistA", "Two", "AlbumX", added_at="2024-01-02T00:00:00Z"),
+        ]
+        self.write_likes(likes)
+        placed = resolve.library_path(self.config(), likes[0], 1)
+        placed.parent.mkdir(parents=True, exist_ok=True)
+        placed.write_bytes(b"placed-earlier")
+
+        resolver = FakeResolve()
+        steps = {"ingest": FakeIngest(likes), "resolve": resolver, "scan": store.scan}
+        summary = library.sync(self.config(), steps=steps, adopt=True)
+        self.assertEqual(resolver.calls, [["sp2"]], "only the missing track is resolved")
+        self.assertEqual(summary["added"], 2)
+
+        conn = store.open_index(self.config())
+        try:
+            row = store.get_track(conn, "sp1")
+        finally:
+            conn.close()
+        self.assertEqual(row["status"], contract.STATUS_OK)
+        self.assertEqual(row["path"], str(placed))
 
 
 # --- report ---------------------------------------------------------------
