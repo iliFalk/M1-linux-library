@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from music import _contract as contract
-from music import ingest, library, playlists, store
+from music import features, ingest, library, mix, playlists, store
 
 
 class ConfigError(Exception):
@@ -76,7 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(
         dest="command",
-        metavar="{sync,scan,report,status,ingest,playlists}",
+        metavar="{sync,scan,report,status,ingest,playlists,features,mix}",
     )
     commands.required = True
     sync_command = commands.add_parser(
@@ -99,6 +99,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     commands.add_parser(
         "ingest", help="read the liked tracks into the state directory"
+    )
+    commands.add_parser(
+        "features", help="fetch audio features and artist genres from Spotify"
+    )
+    mix_command = commands.add_parser(
+        "mix", help="write one .m3u per rule set of the mix file"
+    )
+    mix_command.add_argument(
+        "--from", dest="mix_from", metavar="PATH", default=None,
+        help="mix file (default: MUSIC_MIX_FILE)",
     )
     playlist_command = commands.add_parser(
         "playlists", help="write one .m3u per playlist of the export"
@@ -123,6 +133,35 @@ def _run_scan(config: dict) -> int:
     finally:
         conn.close()
     print(f"indexed {result['indexed']}, missing {result['missing']}")
+    return 0
+
+
+def _run_features(config: dict) -> int:
+    token_path = os.environ.get("MUSIC_SPOTIFY_TOKEN") or "/opt/falknest/music-state/spotify.json"
+    try:
+        counts = features.refresh(config, token_path)
+    except (OSError, ValueError, features.spotify.SpotifyError) as exc:
+        print(f"music: {exc}", file=sys.stderr)
+        return 2
+    print(
+        f"tracks {counts['tracks']}, features {counts['features']}, "
+        f"artists {counts['artists']}, genres {counts['genres']}"
+    )
+    return 0
+
+
+def _run_mix(config: dict, source: str | None) -> int:
+    path = source or os.environ.get("MUSIC_MIX_FILE") or ""
+    if not path:
+        print("music: no mix file; pass --from PATH or set MUSIC_MIX_FILE", file=sys.stderr)
+        return 2
+    try:
+        rows = mix.build(config, path)
+    except (OSError, ValueError) as exc:
+        print(f"music: {exc}", file=sys.stderr)
+        return 2
+    for row in rows:
+        print(f"{row['name']}: {row['tracks']} tracks")
     return 0
 
 
@@ -193,6 +232,10 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         return _run_status(config)
     if args.command == "playlists":
         return _run_playlists(config, getattr(args, "playlists_from", None))
+    if args.command == "features":
+        return _run_features(config)
+    if args.command == "mix":
+        return _run_mix(config, getattr(args, "mix_from", None))
     if args.command == "ingest":
         return _run_ingest(config)
     return 2

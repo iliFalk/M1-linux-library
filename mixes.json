@@ -1,0 +1,32 @@
+{
+  "playlists": {
+    "Training Energy": {
+      "require": {"energy": [0.65, 1.0], "tempo": [110, 175]},
+      "sort": [["energy", "desc"], ["tempo", "desc"]],
+      "limit": 80
+    },
+    "Training Metal": {
+      "require": {"energy": [0.6, 1.0]},
+      "genres_any": ["metal", "metalcore", "deathcore", "thrash", "grindcore", "hardcore"],
+      "sort": [["energy", "desc"], ["tempo", "desc"]],
+      "limit": 60
+    },
+    "Road tripping (long ride)": {
+      "require": {"tempo": [85, 130], "energy": [0.35, 0.8], "valence": [0.35, 1.0]},
+      "genres_none": ["lofi", "lo-fi", "sleep", "ambient"],
+      "sort": [["valence", "desc"]],
+      "limit": 120
+    },
+    "Road tripping (Songs to sing with)": {
+      "require": {"valence": [0.55, 1.0], "energy": [0.45, 0.9], "speechiness": [0.0, 0.2]},
+      "sort": [["valence", "desc"], ["energy", "desc"]],
+      "limit": 70
+    },
+    "Evening": {
+      "require": {"energy": [0.0, 0.5], "tempo": [60, 115]},
+      "genres_none": ["death metal", "brutal death metal", "grindcore", "phonk"],
+      "sort": [["valence", "asc"]],
+      "limit": 80
+    }
+  }
+}
